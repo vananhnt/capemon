@@ -249,3 +249,47 @@ HOOKDEF(BOOL, WINAPI, DeleteService,
 	free(servicename);
 	return ret;
 }
+
+HOOKDEF(BOOL, WINAPI, EnumServicesStatusExA,
+	_In_        SC_HANDLE    hSCManager,
+	_In_        SC_ENUM_TYPE InfoLevel,
+	_In_        DWORD        dwServiceType,
+	_In_        DWORD        dwServiceState,
+	_Out_opt_   LPBYTE       lpServices,
+	_In_        DWORD        cbBufSize,
+	_Out_       LPDWORD      pcbBytesNeeded,
+	_Out_       LPDWORD      lpServicesReturned,
+	_Inout_opt_ LPDWORD      lpResumeHandle,
+	_In_opt_    LPCSTR       pszGroupName
+) {
+	BOOL ret = Old_EnumServicesStatusExA(hSCManager, InfoLevel, dwServiceType,
+		dwServiceState, lpServices, cbBufSize, pcbBytesNeeded,
+		lpServicesReturned, lpResumeHandle, pszGroupName);
+	LOQ_bool("services", "phhis", "ServiceControlManager", hSCManager,
+		"ServiceType", dwServiceType, "ServiceState", dwServiceState,
+		"ServicesReturned", lpServicesReturned ? (int)*lpServicesReturned : 0,
+		"GroupName", pszGroupName);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, EnumServicesStatusExW,
+	_In_        SC_HANDLE    hSCManager,
+	_In_        SC_ENUM_TYPE InfoLevel,
+	_In_        DWORD        dwServiceType,
+	_In_        DWORD        dwServiceState,
+	_Out_opt_   LPBYTE       lpServices,
+	_In_        DWORD        cbBufSize,
+	_Out_       LPDWORD      pcbBytesNeeded,
+	_Out_       LPDWORD      lpServicesReturned,
+	_Inout_opt_ LPDWORD      lpResumeHandle,
+	_In_opt_    LPCWSTR      pszGroupName
+) {
+	BOOL ret = Old_EnumServicesStatusExW(hSCManager, InfoLevel, dwServiceType,
+		dwServiceState, lpServices, cbBufSize, pcbBytesNeeded,
+		lpServicesReturned, lpResumeHandle, pszGroupName);
+	LOQ_bool("services", "phhiu", "ServiceControlManager", hSCManager,
+		"ServiceType", dwServiceType, "ServiceState", dwServiceState,
+		"ServicesReturned", lpServicesReturned ? (int)*lpServicesReturned : 0,
+		"GroupName", pszGroupName);
+	return ret;
+}

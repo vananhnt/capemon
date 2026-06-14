@@ -573,6 +573,8 @@ hook_t full_hooks[] = {
 	HOOK(advapi32, StartServiceW),
 	HOOK(advapi32, ControlService),
 	HOOK(advapi32, DeleteService),
+	HOOK(advapi32, EnumServicesStatusExA),
+	HOOK(advapi32, EnumServicesStatusExW),
 	HOOK(sechost, OpenSCManagerA),
 	HOOK(sechost, OpenSCManagerW),
 	HOOK(sechost, CreateServiceA),
@@ -583,6 +585,8 @@ hook_t full_hooks[] = {
 	HOOK(sechost, StartServiceW),
 	HOOK(sechost, ControlService),
 	HOOK(sechost, DeleteService),
+	HOOK(sechost, EnumServicesStatusExA),
+	HOOK(sechost, EnumServicesStatusExW),
 
 	// Sleep Hooks
 	HOOK(ntdll, NtQueryPerformanceCounter),
@@ -1491,6 +1495,8 @@ hook_t office_hooks[] = {
 	HOOK(advapi32, StartServiceW),
 	HOOK(advapi32, ControlService),
 	HOOK(advapi32, DeleteService),
+	HOOK(advapi32, EnumServicesStatusExA),
+	HOOK(advapi32, EnumServicesStatusExW),
 
 	// Sleep Hooks
 	HOOK(ntdll, NtQueryPerformanceCounter),
