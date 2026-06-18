@@ -3928,4 +3928,7 @@ HOOKDEF(DWORD, WINAPI, MapFileAndCheckSumA,
 	_Out_ PDWORD CheckSum
 );
 
+/* SAGE_HOOKS_BEGIN */
+/* SAGE_HOOKS_END */
+
 #include "hook_vbscript.h"
