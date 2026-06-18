@@ -1,9 +1,9 @@
 name: MSBuild
 on:
   push:
-    branches: [ "MIRAGE" ]
+    branches: [ "MIRAGE", "*-automated" ]
   pull_request:
-    branches: [ "MIRAGE" ]
+    branches: [ "MIRAGE", "*-automated" ]
 env:
   BUILD_CONFIGURATION: Release
   SOLUTION_FILE_PATH: capemon.sln
