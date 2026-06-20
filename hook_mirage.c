@@ -9,67 +9,64 @@
 #include "config.h"
 #include "misc.h"
 
-static BOOL mirage_wnetenum_contains_ci(LPSTR remotename, LPCSTR substr)
+static const wchar_t *mirage_sandbox_helper_exenames[] = {
+	L"VBoxService.exe",
+	L"VBoxTray.exe",
+	L"vmtoolsd.exe",
+	L"vmwaretray.exe",
+	L"vmwareuser.exe",
+	L"vmacthlp.exe",
+	L"capemon.exe",
+	L"agent.exe"
+};
+
+static BOOL mirage_wnetenum_contains_ci(LPCSTR str, LPCSTR substr)
 {
-	if (!remotename)
+	if (!str)
 		return FALSE;
 
-	return stristr(remotename, substr) != NULL;
+	return stristr((char *)str, substr) ? TRUE : FALSE;
 }
 
-static BOOL mirage_toolhelp_is_sandbox_helper_pid(DWORD pid)
+static BOOL mirage_process32first_is_sandbox_helper(LPCWSTR exeFileName)
 {
-	static const char *sandbox_helper_names[] = {
-		"vboxservice.exe", "vboxtray.exe", "vmtoolsd.exe",
-		"vmwaretray.exe", "vmwareuser.exe", "qemu-ga.exe"
-	};
-	HANDLE hProcess;
-	char path[MAX_PATH];
-	char *basename;
-	DWORD size;
-	ULONG i;
-	BOOL ismatch;
-
-	size = sizeof(path);
-	ismatch = FALSE;
-
-	hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-	if (!hProcess)
-		return FALSE;
-
-	if (QueryFullProcessImageNameA(hProcess, 0, path, &size)) {
-		basename = strrchr(path, '\\');
-		basename = basename ? basename + 1 : path;
-
-		for (i = 0; i < sizeof(sandbox_helper_names) / sizeof(sandbox_helper_names[0]); i++) {
-			if (!_stricmp(basename, sandbox_helper_names[i])) {
-				ismatch = TRUE;
-				break;
-			}
-		}
-	}
-
-	CloseHandle(hProcess);
-	return ismatch;
-}
-
-static BOOL mirage_process32first_is_sandbox_helper(const WCHAR *szExeFile)
-{
-	static const WCHAR *sandbox_helper_names[] = {
-		L"vboxservice.exe", L"vboxtray.exe", L"vmtoolsd.exe",
-		L"vmwaretray.exe", L"vmwareuser.exe", L"qemu-ga.exe"
-	};
 	ULONG i;
 
-	if (!szExeFile)
+	if (!exeFileName)
 		return FALSE;
 
-	for (i = 0; i < sizeof(sandbox_helper_names) / sizeof(sandbox_helper_names[0]); i++) {
-		if (!_wcsicmp(szExeFile, sandbox_helper_names[i]))
+	for (i = 0; i < sizeof(mirage_sandbox_helper_exenames) / sizeof(mirage_sandbox_helper_exenames[0]); i++) {
+		if (!wcsicmp(exeFileName, mirage_sandbox_helper_exenames[i]))
 			return TRUE;
 	}
 
 	return FALSE;
+}
+
+static BOOL mirage_toolhelp_is_sandbox_helper_pid(DWORD pid)
+{
+	HANDLE snap;
+	PROCESSENTRY32W entry;
+	BOOL ismatch;
+
+	snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap == INVALID_HANDLE_VALUE)
+		return FALSE;
+
+	ismatch = FALSE;
+	entry.dwSize = sizeof(PROCESSENTRY32W);
+
+	if (Process32FirstW(snap, &entry)) {
+		do {
+			if (entry.th32ProcessID == pid) {
+				ismatch = mirage_process32first_is_sandbox_helper(entry.szExeFile);
+				break;
+			}
+		} while (Process32NextW(snap, &entry));
+	}
+
+	CloseHandle(snap);
+	return ismatch;
 }
 
         HOOKDEF(BOOL, WINAPI, GetSystemFirmwareTable, DWORD FirmwareTableProviderSignature, DWORD FirmwareTableID, PVOID pFirmwareTableBuffer, DWORD BufferSize)
