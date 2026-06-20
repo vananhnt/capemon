@@ -814,7 +814,7 @@ hook_t full_hooks[] = {
 	HOOK_SPECIAL(vbscript, VbsRound),
 	HOOK_SPECIAL(vbscript, VbsPrint),
     /* SAGE_HOOKS_BEGIN */
-    /* SAGE_HOOKS_END */
+/* SAGE_HOOKS_END */
 };
 
 hook_t native_hooks[] = {
