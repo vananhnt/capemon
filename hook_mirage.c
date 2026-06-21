@@ -8,6 +8,47 @@
 #include "log.h"
 #include "config.h"
 #include "misc.h"
+
+static const WCHAR *g_mirage_sandbox_helper_names[] = {
+	L"vboxservice.exe", L"vboxtray.exe",
+	L"vmtoolsd.exe", L"vmwaretray.exe", L"vmwareuser.exe", L"vmusrvc.exe", L"vmsrvc.exe",
+	L"qemu-ga.exe",
+	L"sandboxierpcss.exe", L"sandboxiedcomlaunch.exe",
+	L"prl_tools.exe", L"prl_cc.exe"
+};
+
+static BOOL mirage_is_sandbox_helper_exe_name(const WCHAR *exename)
+{
+	ULONG i;
+
+	if (!exename)
+		return FALSE;
+
+	for (i = 0; i < sizeof(g_mirage_sandbox_helper_names) / sizeof(g_mirage_sandbox_helper_names[0]); i++) {
+		if (!wcsicmp(exename, g_mirage_sandbox_helper_names[i]))
+			return TRUE;
+	}
+
+	return FALSE;
+}
+
+static BOOL mirage_wnetenum_contains_ci(LPSTR haystack, LPCSTR needle)
+{
+	if (!haystack || !needle)
+		return FALSE;
+
+	return stristr(haystack, needle) != NULL;
+}
+
+static BOOL mirage_process32first_is_sandbox_helper(const WCHAR *exename)
+{
+	return mirage_is_sandbox_helper_exe_name(exename);
+}
+
+/* Defined below, after the CreateToolhelp32Snapshot/Process32FirstW/Process32NextW
+ * hooks declare Old_CreateToolhelp32Snapshot/Old_Process32FirstW/Old_Process32NextW. */
+static BOOL mirage_toolhelp_is_sandbox_helper_pid(DWORD pid);
+
         HOOKDEF(BOOL, WINAPI, GetSystemFirmwareTable, DWORD FirmwareTableProviderSignature, DWORD FirmwareTableID, PVOID pFirmwareTableBuffer, DWORD BufferSize)
         {
             BOOL ret;
@@ -118,9 +159,9 @@
 
 	ret = Old_GetTickCount64();
 
-	if (!g_config.no_stealth && ret < 720000) {
+	if (!g_config.no_stealth && ret < 600000) {
 		get_lasterrors(&lasterror);
-		ret = 720000;
+		ret = 600000;
 		set_lasterrors(&lasterror);
 	}
 
@@ -336,3 +377,30 @@
 
 	return ret;
         }
+
+static BOOL mirage_toolhelp_is_sandbox_helper_pid(DWORD pid)
+{
+	HANDLE snap;
+	PROCESSENTRY32W entry;
+	BOOL ok;
+	BOOL found;
+
+	found = FALSE;
+
+	snap = Old_CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap == INVALID_HANDLE_VALUE)
+		return FALSE;
+
+	entry.dwSize = sizeof(entry);
+	ok = Old_Process32FirstW(snap, &entry);
+	while (ok) {
+		if (entry.th32ProcessID == pid) {
+			found = mirage_is_sandbox_helper_exe_name(entry.szExeFile);
+			break;
+		}
+		ok = Old_Process32NextW(snap, &entry);
+	}
+
+	CloseHandle(snap);
+	return found;
+}
