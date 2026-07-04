@@ -1033,6 +1033,16 @@ HOOKDEF(BOOL, WINAPI, Module32NextW,
 	__out LPMODULEENTRY32W lpme
 );
 
+HOOKDEF(BOOL, WINAPI, Thread32First,
+	__in HANDLE hSnapshot,
+	__out LPTHREADENTRY32 lpme
+);
+
+HOOKDEF(BOOL, WINAPI, Thread32Next,
+	__in HANDLE hSnapshot,
+	__out LPTHREADENTRY32 lpme
+);
+
 HOOKDEF(BOOL, WINAPI, K32EnumProcesses,
 	_Out_writes_bytes_(cb)	DWORD*	lpidProcess,
 	_In_					DWORD	cb,
@@ -2142,6 +2152,19 @@ HOOKDEF(HRESULT, WINAPI, PStoreCreateInstance,
 	_In_  VOID  *pProviderID,
 	_In_  VOID  *pReserved,
 	_In_  DWORD dwFlags
+);
+
+HOOKDEF(HANDLE, WINAPI, GetClipboardData,
+	_In_ UINT uFormat
+);
+
+HOOKDEF(BOOL, WINAPI, OpenClipboard,
+	_In_opt_ HWND hWndNewOwner
+);
+
+HOOKDEF(HANDLE, WINAPI, SetClipboardData,
+	_In_ UINT uFormat,
+	_In_opt_ HANDLE hMem
 );
 
 //
@@ -3338,6 +3361,93 @@ HOOKDEF(NTSTATUS, WINAPI, BCryptKeyDerivation,
 	ULONG				dwFlags
 );
 
+HOOKDEF(BOOL, WINAPI, CryptSignMessage,
+	_In_ PCRYPT_SIGN_MESSAGE_PARA pSignPara,
+	_In_ BOOL fDetachedSignature,
+	_In_ DWORD cToBeSigned,
+	_In_ const BYTE *rgpbToBeSigned[],
+	_In_ DWORD rgcbToBeSigned[],
+	_Out_ BYTE *pbSignedBlob,
+	_Inout_ DWORD *pcbSignedBlob
+);
+
+HOOKDEF(BOOL, WINAPI, CryptVerifyMessageSignature,
+	_In_ PCRYPT_VERIFY_MESSAGE_PARA pVerifyPara,
+	_In_ DWORD dwSignerIndex,
+	_In_ const BYTE *pbDecoded,
+	_In_ DWORD cbDecoded,
+	_Out_opt_ BYTE *pbDecodedMsg,
+	_Inout_opt_ DWORD *pcbDecodedMsg,
+	_Out_opt_ PCCERT_CONTEXT *ppSignerCert
+);
+
+HOOKDEF(NTSTATUS, WINAPI, BCryptCreateHash,
+	BCRYPT_ALG_HANDLE hAlgorithm,
+	BCRYPT_HASH_HANDLE *phHash,
+	PUCHAR pbHashObject,
+	ULONG cbHashObject,
+	PUCHAR pbSecret,
+	ULONG cbSecret,
+	ULONG dwFlags
+);
+
+HOOKDEF(NTSTATUS, WINAPI, BCryptDestroyHash,
+	BCRYPT_HASH_HANDLE hHash
+);
+
+HOOKDEF(NTSTATUS, WINAPI, BCryptGenRandom,
+	BCRYPT_ALG_HANDLE hAlgorithm,
+	PUCHAR pbBuffer,
+	ULONG cbBuffer,
+	ULONG dwFlags
+);
+
+HOOKDEF(NTSTATUS, WINAPI, BCryptOpenAlgorithmProvider,
+	BCRYPT_ALG_HANDLE *phAlgorithm,
+	LPCWSTR pszAlgId,
+	LPCWSTR pszImplementation,
+	ULONG dwFlags
+);
+
+HOOKDEF(NTSTATUS, WINAPI, BCryptCloseAlgorithmProvider,
+	BCRYPT_ALG_HANDLE hAlgorithm,
+	ULONG dwFlags
+);
+
+HOOKDEF(SECURITY_STATUS, WINAPI, NCryptCreatePersistedKey,
+	NCRYPT_PROV_HANDLE hProvider,
+	NCRYPT_KEY_HANDLE *phKey,
+	LPCWSTR pszAlgId,
+	LPCWSTR pszKeyName,
+	DWORD dwLegacyKeySpec,
+	DWORD dwFlags
+);
+
+HOOKDEF(SECURITY_STATUS, WINAPI, NCryptFinalizeKey,
+	NCRYPT_KEY_HANDLE hKey,
+	DWORD dwFlags
+);
+
+HOOKDEF(SECURITY_STATUS, WINAPI, NCryptOpenKey,
+	NCRYPT_PROV_HANDLE hProvider,
+	NCRYPT_KEY_HANDLE *phKey,
+	LPCWSTR pszKeyName,
+	DWORD dwLegacyKeySpec,
+	DWORD dwFlags
+);
+
+HOOKDEF(NTSTATUS, WINAPI, RtlEncryptMemory,
+	_Inout_ PVOID  Memory,
+	_In_    ULONG  MemorySize,
+	_In_    ULONG  OptionFlags
+);
+
+HOOKDEF(NTSTATUS, WINAPI, RtlDecryptMemory,
+    _Inout_ PVOID  Memory,
+    _In_    ULONG  MemorySize,
+    _In_    ULONG  OptionFlags
+);
+
 //
 // Special Hooks
 //
@@ -3770,26 +3880,6 @@ HOOKDEF(HRESULT, WINAPI, IsValidURL,
 	_In_       LPBC    pBC,
 	_In_       LPCWSTR szURL,
 	_Reserved_ DWORD   dwReserved
-);
-
-HOOKDEF(int, WINAPI, MultiByteToWideChar,
-	__in		UINT	CodePage,
-	__in		DWORD	dwFlags,
-	__in		LPCCH	lpMultiByteStr,
-	__in		int		cbMultiByte,
-	__out_opt	LPWSTR	lpWideCharStr,
-	__in		int		cchWideChar
-);
-
-HOOKDEF(int, WINAPI, WideCharToMultiByte,
-	__in		UINT	CodePage,
-	__in		DWORD	dwFlags,
-	__in		LPCWCH	lpWideCharStr,
-	__in		int		cchWideChar,
-	__out_opt	LPSTR	lpMultiByteStr,
-	__in		int		cbMultiByte,
-	__in_opt	LPCCH	lpDefaultChar,
-	__out_opt	LPBOOL	lpUsedDefaultChar
 );
 
 HOOKDEF(LPSTR, WINAPI, GetCommandLineA,

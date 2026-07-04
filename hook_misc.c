@@ -33,7 +33,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "CAPE\YaraHarness.h"
 
 #define STATUS_BAD_COMPRESSION_BUFFER ((NTSTATUS)0xC0000242L)
-
+#define MAX_CLIPBOARD_BUFFER_OF_INTEREST 256
 extern char *our_process_name;
 extern void ProcessMessage(DWORD ProcessId, DWORD ThreadId);
 extern const char* GetLanguageName(LANGID langID);
@@ -44,6 +44,7 @@ extern BOOL Trace(struct _EXCEPTION_POINTERS* ExceptionInfo);
 
 LPTOP_LEVEL_EXCEPTION_FILTER TopLevelExceptionFilter;
 DWORD ExportAddress;
+
 
 HOOKDEF(HHOOK, WINAPI, SetWindowsHookExA,
 	__in  int idHook,
@@ -222,11 +223,11 @@ HOOKDEF(NTSTATUS, WINAPI, LdrGetDllHandle,
 }
 
 HOOKDEF(NTSTATUS, WINAPI, LdrGetDllHandleEx,
-    __in ULONG Flags,
-    __in_opt PWSTR DllPath,
-    __in PULONG DllCharacteristics,
-    __in PUNICODE_STRING DllName,
-    __out_opt PVOID *DllHandle
+	__in ULONG Flags,
+	__in_opt PWSTR DllPath,
+	__in PULONG DllCharacteristics,
+	__in PUNICODE_STRING DllName,
+	__out_opt PVOID *DllHandle
 ) {
 	NTSTATUS ret = Old_LdrGetDllHandleEx(Flags, DllPath, DllCharacteristics, DllName, DllHandle);
 	if (DllHandle)
@@ -690,7 +691,7 @@ HOOKDEF(BOOL, WINAPI, GetComputerNameExW,
 	if (nSize && *nSize)
 		bufsize = *nSize;
 	BOOL ret = Old_GetComputerNameExW(NameType, lpBuffer, nSize);
-	if (ret && nSize && !*nSize && NameType < ComputerNameMax && wcslen(ComputerNames[NameType]) < bufsize) {
+	if (!g_config.no_stealth && ret && nSize && !*nSize && NameType >= 0 && NameType < ComputerNameMax && wcslen(ComputerNames[NameType]) < bufsize) {
 		bufsize = (DWORD)wcslen(ComputerNames[NameType]);
 		wcsncpy(lpBuffer, ComputerNames[NameType], bufsize + 1);
 		*nSize = bufsize;
@@ -1825,40 +1826,10 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueryLicenseValue,
 ) {
 	WCHAR VMDetection[] = L"Kernel-VMDetection-Private";
 	NTSTATUS ret = Old_NtQueryLicenseValue(Name, Type, Buffer, Length, DataLength);
-	if (NT_SUCCESS(ret) && Buffer && !wcsncmp(Name->Buffer, VMDetection, Name->Length))
+	if (!g_config.no_stealth && NT_SUCCESS(ret) && Buffer && Name && Name->Buffer && Name->Length == sizeof(VMDetection) - sizeof(WCHAR) && !wcsncmp(Name->Buffer, VMDetection, Name->Length / sizeof(WCHAR)))
 		*(PBOOL)Buffer = FALSE;
 	LOQ_ntstatus("system", "oP", "Name", Name, "Type", Type);
 	return ret;
-}
-
-HOOKDEF(int, WINAPI, MultiByteToWideChar,
-	__in		UINT	CodePage,
-	__in		DWORD	dwFlags,
-	__in		LPCCH	lpMultiByteStr,
-	__in		int		cbMultiByte,
-	__out_opt	LPWSTR	lpWideCharStr,
-	__in		int		cchWideChar
-) {
-	DWORD ret = 0;
-	if (CodePage == CP_ACP || CodePage == CP_UTF8)
-		LOQ_zero("misc", "s", "String", lpMultiByteStr);
-	return Old_MultiByteToWideChar(CodePage, dwFlags, lpMultiByteStr, cbMultiByte, lpWideCharStr, cchWideChar);
-}
-
-HOOKDEF(int, WINAPI, WideCharToMultiByte,
-	__in		UINT	CodePage,
-	__in		DWORD	dwFlags,
-	__in		LPCWCH	lpWideCharStr,
-	__in		int		cchWideChar,
-	__out_opt	LPSTR	lpMultiByteStr,
-	__in		int		cbMultiByte,
-	__in_opt	LPCCH	lpDefaultChar,
-	__out_opt	LPBOOL	lpUsedDefaultChar
-) {
-	DWORD ret = 0;
-	if (CodePage == CP_ACP || CodePage == CP_UTF8)
-		LOQ_zero("misc", "u", "String", lpWideCharStr);
-	return Old_WideCharToMultiByte(CodePage, dwFlags, lpWideCharStr, cchWideChar, lpMultiByteStr, cbMultiByte, lpDefaultChar, lpUsedDefaultChar);
 }
 
 HOOKDEF(LPSTR, WINAPI, GetCommandLineA,
@@ -1904,10 +1875,12 @@ HOOKDEF(BOOL, WINAPI, EnumDisplayDevicesA,
 	const char replacement[] = "NVIDIA GeForce RTX 3060";
 
 	BOOL ret = Old_EnumDisplayDevicesA(lpDevice, iDevNum, lpDisplayDevice, dwFlags);
-	for (int i = 0; i < keywords_size; i++) {
-		if (stristr(lpDisplayDevice->DeviceString, keywords[i]) != NULL) {
-			snprintf(lpDisplayDevice->DeviceString, strlen(replacement) + 1, replacement);
-			break;
+	if (!g_config.no_stealth && ret && lpDisplayDevice) {
+		for (int i = 0; i < keywords_size; i++) {
+			if (stristr(lpDisplayDevice->DeviceString, keywords[i]) != NULL) {
+				snprintf(lpDisplayDevice->DeviceString, strlen(replacement) + 1, replacement);
+				break;
+			}
 		}
 	}
 	LOQ_bool("misc", "s", "DeviceString", lpDisplayDevice->DeviceString);
@@ -1932,10 +1905,12 @@ HOOKDEF(BOOL, WINAPI, EnumDisplayDevicesW,
 	const wchar_t replacement[] = L"NVIDIA GeForce RTX 3060";
 
 	BOOL ret = Old_EnumDisplayDevicesW(lpDevice, iDevNum, lpDisplayDevice, dwFlags);
-	for (int i = 0; i < keywords_size; i++) {
-		if (wcsistr(lpDisplayDevice->DeviceString, keywords[i]) != NULL) {
-			swprintf(lpDisplayDevice->DeviceString, wcslen(replacement) + 1, replacement);
-			break;
+	if (!g_config.no_stealth && ret && lpDisplayDevice) {
+		for (int i = 0; i < keywords_size; i++) {
+			if (wcsistr(lpDisplayDevice->DeviceString, keywords[i]) != NULL) {
+				swprintf(lpDisplayDevice->DeviceString, wcslen(replacement) + 1, replacement);
+				break;
+			}
 		}
 	}
 	LOQ_bool("misc", "u", "DeviceString", lpDisplayDevice->DeviceString);
@@ -1968,19 +1943,19 @@ HOOKDEF(ULONG, __fastcall, vDbgPrintExWithPrefixInternal,
 	__in  va_list arglist,
 	__in  BOOLEAN HandleBreakpoint
 ) {
-    UCHAR Buffer[512];
-    size_t cb = strlen(Prefix);
-    strcpy(Buffer, Prefix);
-    cb = _vsnprintf(Buffer + cb, sizeof(Buffer) - cb, Format, arglist) + cb;
+	UCHAR Buffer[512];
+	size_t cb = strlen(Prefix);
+	strcpy(Buffer, Prefix);
+	cb = _vsnprintf(Buffer + cb, sizeof(Buffer) - cb, Format, arglist) + cb;
 
-    if (cb == -1) {
-        cb = sizeof(Buffer);
-        Buffer[sizeof(Buffer) - 1] = '\n';
-    }
+	if (cb == -1) {
+		cb = sizeof(Buffer);
+		Buffer[sizeof(Buffer) - 1] = '\n';
+	}
 
 	DebugOutput("%s", Buffer);
 
-    return Old_vDbgPrintExWithPrefixInternal(Prefix, ComponentId, Level, Format, arglist, HandleBreakpoint);
+	return Old_vDbgPrintExWithPrefixInternal(Prefix, ComponentId, Level, Format, arglist, HandleBreakpoint);
 }
 
 HOOKDEF(DWORD, WINAPI, MapFileAndCheckSumA,
@@ -2003,13 +1978,13 @@ HOOKDEF(DWORD, WINAPI, MapFileAndCheckSumA,
 
 HOOKDEF(NTSTATUS, WINAPI, NtPowerInformation,
 	__in		POWER_INFORMATION_LEVEL InformationLevel,
-	__in_opt	PVOID                   InputBuffer,
-	__in		ULONG                   InputBufferLength,
-	__out_opt	PVOID                   OutputBuffer,
-	__in		ULONG                   OutputBufferLength
+	__in_opt	PVOID				   InputBuffer,
+	__in		ULONG				   InputBufferLength,
+	__out_opt	PVOID				   OutputBuffer,
+	__in		ULONG				   OutputBufferLength
 ) {
 	NTSTATUS ret = Old_NtPowerInformation(InformationLevel, InputBuffer, InputBufferLength, OutputBuffer, OutputBufferLength);
-	if (ret == 0 && OutputBuffer && InformationLevel == SystemPowerCapabilities && OutputBufferLength >= sizeof(SYSTEM_POWER_CAPABILITIES)) {
+	if (!g_config.no_stealth && ret == 0 && OutputBuffer && InformationLevel == SystemPowerCapabilities && OutputBufferLength >= sizeof(SYSTEM_POWER_CAPABILITIES)) {
 		// Most VM systems does not support either S0 or S3 sleep, which can be used to detect the presence of a VM.
 		// S0, S4 and S5 being enabled is typical for a normal Modern Standby machine. 
 		SYSTEM_POWER_CAPABILITIES* ptr = (SYSTEM_POWER_CAPABILITIES *)OutputBuffer;
@@ -2022,5 +1997,113 @@ HOOKDEF(NTSTATUS, WINAPI, NtPowerInformation,
 		"InformationLevel", InformationLevel,
 		"InputBuffer", InputBufferLength, InputBuffer,
 		"OutputBuffer", OutputBufferLength, OutputBuffer);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, OpenClipboard,
+	_In_opt_ HWND hWndNewOwner
+){
+	BOOL ret = Old_OpenClipboard(hWndNewOwner);
+	LOQ_bool("misc", ""); 
+	return ret;
+}
+
+HOOKDEF(HANDLE, WINAPI, GetClipboardData,
+	_In_ UINT uFormat
+){
+	HANDLE ret = Old_GetClipboardData(uFormat);
+	if (ret == NULL)
+		return ret;
+
+	if (uFormat == CF_UNICODETEXT) {
+		LPWSTR clip_buff = (LPWSTR)GlobalLock(ret);
+		if (clip_buff == NULL)
+			return ret;
+		size_t textLen = wcsnlen(clip_buff, MAX_CLIPBOARD_BUFFER_OF_INTEREST) + 1;
+		LPWSTR local_buff = (LPWSTR)malloc(textLen * sizeof(WCHAR));
+		if (local_buff) {
+			wcsncpy_s(local_buff, textLen, clip_buff, _TRUNCATE);
+			GlobalUnlock(ret);
+			LOQ_handle("misc", "iu", "Format", uFormat, "Data", local_buff);
+			free(local_buff);
+		} else {
+			GlobalUnlock(ret);
+		}
+	} else if (uFormat == CF_TEXT || uFormat == CF_OEMTEXT) {
+		char* clip_buff = (char*)GlobalLock(ret);
+		if (clip_buff == NULL)
+			return ret;
+		size_t textLen = strnlen(clip_buff, MAX_CLIPBOARD_BUFFER_OF_INTEREST) + 1;
+		char* local_buff = (char*)malloc(textLen * sizeof(char));
+		if (local_buff) {
+			strncpy_s(local_buff, textLen, clip_buff, _TRUNCATE);
+			GlobalUnlock(ret);
+			if (uFormat == CF_TEXT) {
+				LOQ_handle("misc", "is", "Format", uFormat, "Data", local_buff);
+			} else {
+				char conv_buff[MAX_CLIPBOARD_BUFFER_OF_INTEREST];
+				OemToCharBuffA(local_buff, conv_buff, (DWORD)MAX_CLIPBOARD_BUFFER_OF_INTEREST);
+				LOQ_handle("misc", "is", "Format", uFormat, "Data", conv_buff);
+			}
+			free(local_buff);
+		} else {
+			GlobalUnlock(ret);
+		}
+	} else {
+		LOQ_handle("misc", "i", "Format", uFormat);
+	}
+	return ret;
+}
+
+HOOKDEF(HANDLE, WINAPI, SetClipboardData,
+	_In_	 UINT   uFormat,
+	_In_opt_ HANDLE hMem
+){
+	// Log what the malware is writing before the call, since the system
+	// takes ownership of hMem after SetClipboardData succeeds.
+	if (hMem != NULL) {
+		if (uFormat == CF_UNICODETEXT) {
+			LPWSTR clip_buff = (LPWSTR)GlobalLock(hMem);
+			if (clip_buff != NULL) {
+				size_t textLen = wcsnlen(clip_buff, MAX_CLIPBOARD_BUFFER_OF_INTEREST) + 1;
+				LPWSTR local_buff = (LPWSTR)malloc(textLen * sizeof(WCHAR));
+				if (local_buff) {
+					wcsncpy_s(local_buff, textLen, clip_buff, _TRUNCATE);
+					GlobalUnlock(hMem);
+					HANDLE ret = Old_SetClipboardData(uFormat, hMem);
+					LOQ_handle("misc", "iu", "Format", uFormat, "Data", local_buff);
+					free(local_buff);
+					return ret;
+				}
+				GlobalUnlock(hMem);
+			}
+		} else if (uFormat == CF_TEXT || uFormat == CF_OEMTEXT) {
+			char* clip_buff = (char*)GlobalLock(hMem);
+			if (clip_buff != NULL) {
+				size_t textLen = strnlen(clip_buff, MAX_CLIPBOARD_BUFFER_OF_INTEREST) + 1;
+				char* local_buff = (char*)malloc(textLen * sizeof(char));
+				if (local_buff) {
+					strncpy_s(local_buff, textLen, clip_buff, _TRUNCATE);
+					GlobalUnlock(hMem);
+					HANDLE ret = Old_SetClipboardData(uFormat, hMem);
+					if (uFormat == CF_TEXT) {
+						LOQ_handle("misc", "is", "Format", uFormat, "Data", local_buff);
+					} else {
+						char conv_buff[MAX_CLIPBOARD_BUFFER_OF_INTEREST];
+						OemToCharBuffA(local_buff, conv_buff, (DWORD)MAX_CLIPBOARD_BUFFER_OF_INTEREST);
+						LOQ_handle("misc", "is", "Format", uFormat, "Data", conv_buff);
+					}
+					free(local_buff);
+					return ret;
+				}
+				GlobalUnlock(hMem);
+			}
+		}
+	}
+
+	HANDLE ret = Old_SetClipboardData(uFormat, hMem);
+	if (ret == NULL)
+		return ret;
+	LOQ_handle("misc", "i", "Format", uFormat);
 	return ret;
 }
