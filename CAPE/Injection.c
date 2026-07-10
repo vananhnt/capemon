@@ -1418,5 +1418,5 @@ void ProcessMessage(DWORD ProcessId, DWORD ThreadId)
 		hook_enable();
 	}
 	else
-		pipe("PROCESS:%d,%d", ProcessId, ThreadId);
+		pipe("PROCESS:%d:%d,%d", ThreadId ? 1 : 0, ProcessId, ThreadId);
 }

@@ -667,3 +667,4 @@ HOOKDEF(HRESULT, WINAPI, IsValidURL,
 	LOQ_hresult("network", "u", "URL", szURL);
 	return ret;
 }
+

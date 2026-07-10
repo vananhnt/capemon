@@ -1039,3 +1039,48 @@ HOOKDEF(NTSTATUS, WINAPI, SetThreadDescription,
 	LOQ_ntstatus("threading", "pu", "ThreadHandle", hThread, "ThreadDescription", lpThreadDescription);
 	return ret;
 }
+
+// ---- priority-high spec hooks (auto-generated from hook_spec_priority_high.jsonl) ----
+
+HOOKDEF(BOOL, WINAPI, Thread32First,
+	HANDLE hSnapshot,
+	PVOID lpte
+) {
+	BOOL ret;
+	ret = Old_Thread32First(hSnapshot, lpte);
+	LOQ_bool("threading", "pp", "hSnapshot", hSnapshot, "lpte", lpte);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, Thread32Next,
+	HANDLE hSnapshot,
+	PVOID lpte
+) {
+	BOOL ret;
+	ret = Old_Thread32Next(hSnapshot, lpte);
+	LOQ_bool("threading", "pp", "hSnapshot", hSnapshot, "lpte", lpte);
+	return ret;
+}
+
+
+// ---- all unhooked-classified hooks (auto-generated, sanitized types) ----
+
+HOOKDEF(BOOL, WINAPI, QueryThreadCycleTime,
+	HANDLE ThreadHandle,
+	PULONG64 CycleTime
+) {
+	BOOL ret;
+	ret = Old_QueryThreadCycleTime(ThreadHandle, CycleTime);
+	LOQ_bool("threading", "ph", "ThreadHandle", ThreadHandle, "CycleTime", CycleTime);
+	return ret;
+}
+
+HOOKDEF(DWORD_PTR, WINAPI, SetThreadAffinityMask,
+	HANDLE hThread,
+	DWORD_PTR dwThreadAffinityMask
+) {
+	DWORD_PTR ret;
+	ret = Old_SetThreadAffinityMask(hThread, dwThreadAffinityMask);
+	LOQ_nonzero("threading", "ph", "hThread", hThread, "dwThreadAffinityMask", dwThreadAffinityMask);
+	return ret;
+}

@@ -1539,3 +1539,217 @@ HOOKDEF(BOOL, WINAPI, UpdateProcThreadAttribute,
 	LOQ_zero("process", "lL", "Attribute", Attribute, "Value", lpValue);
 	return ret;
 }
+
+
+// ---- priority-high spec hooks (auto-generated from hook_spec_priority_high.jsonl) ----
+
+HOOKDEF(PVOID, WINAPI, AddVectoredExceptionHandler,
+	ULONG First,
+	PVOID Handler
+) {
+	PVOID ret;
+	ret = Old_AddVectoredExceptionHandler(First, Handler);
+	LOQ_nonnull("process", "hp", "First", First, "Handler", Handler);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, CheckRemoteDebuggerPresent,
+	HANDLE hProcess,
+	PVOID pbDebuggerPresent
+) {
+	BOOL ret;
+	ret = Old_CheckRemoteDebuggerPresent(hProcess, pbDebuggerPresent);
+	LOQ_bool("process", "pp", "hProcess", hProcess, "pbDebuggerPresent", pbDebuggerPresent);
+	return ret;
+}
+
+
+
+HOOKDEF(BOOL, WINAPI, IsWow64Process,
+	HANDLE hProcess,
+	PVOID Wow64Process
+) {
+	BOOL ret;
+	ret = Old_IsWow64Process(hProcess, Wow64Process);
+	LOQ_bool("process", "pp", "hProcess", hProcess, "Wow64Process", Wow64Process);
+	return ret;
+}
+
+HOOKDEF(HANDLE, WINAPI, OpenProcess,
+	DWORD dwDesiredAccess,
+	BOOL bInheritHandle,
+	DWORD dwProcessId
+) {
+	HANDLE ret;
+	ret = Old_OpenProcess(dwDesiredAccess, bInheritHandle, dwProcessId);
+	LOQ_handle("process", "hih", "dwDesiredAccess", dwDesiredAccess, "bInheritHandle", bInheritHandle, "dwProcessId", dwProcessId);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, OpenProcessToken,
+	HANDLE ProcessHandle,
+	DWORD DesiredAccess,
+	PVOID TokenHandle
+) {
+	BOOL ret;
+	ret = Old_OpenProcessToken(ProcessHandle, DesiredAccess, TokenHandle);
+	LOQ_bool("process", "php", "ProcessHandle", ProcessHandle, "DesiredAccess", DesiredAccess, "TokenHandle", TokenHandle);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, QueryFullProcessImageNameA,
+	HANDLE hProcess,
+	DWORD dwFlags,
+	LPCSTR lpExeName,
+	PVOID lpdwSize
+) {
+	BOOL ret;
+	ret = Old_QueryFullProcessImageNameA(hProcess, dwFlags, lpExeName, lpdwSize);
+	LOQ_bool("process", "phsp", "hProcess", hProcess, "dwFlags", dwFlags, "lpExeName", lpExeName, "lpdwSize", lpdwSize);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, QueryFullProcessImageNameW,
+	HANDLE hProcess,
+	DWORD dwFlags,
+	LPCWSTR lpExeName,
+	PVOID lpdwSize
+) {
+	BOOL ret;
+	ret = Old_QueryFullProcessImageNameW(hProcess, dwFlags, lpExeName, lpdwSize);
+	LOQ_bool("process", "phup", "hProcess", hProcess, "dwFlags", dwFlags, "lpExeName", lpExeName, "lpdwSize", lpdwSize);
+	return ret;
+}
+
+HOOKDEF(void, WINAPI, RaiseException,
+	DWORD dwExceptionCode,
+	DWORD dwExceptionFlags,
+	DWORD nNumberOfArguments,
+	PVOID lpArguments
+) {
+	int ret = 0;
+	Old_RaiseException(dwExceptionCode, dwExceptionFlags, nNumberOfArguments, lpArguments);
+	LOQ_void("process", "hhhp", "dwExceptionCode", dwExceptionCode, "dwExceptionFlags", dwExceptionFlags, "nNumberOfArguments", nNumberOfArguments, "lpArguments", lpArguments);
+	return;
+}
+
+HOOKDEF(BOOL, WINAPI, TerminateProcess,
+	HANDLE hProcess,
+	UINT uExitCode
+) {
+	BOOL ret;
+	ret = Old_TerminateProcess(hProcess, uExitCode);
+	LOQ_bool("process", "ph", "hProcess", hProcess, "uExitCode", uExitCode);
+	return ret;
+}
+
+
+// ---- all unhooked-classified hooks (auto-generated, sanitized types) ----
+
+HOOKDEF(DWORD, WINAPI, GetActiveProcessorCount,
+	WORD GroupNumber
+) {
+	DWORD ret;
+	ret = Old_GetActiveProcessorCount(GroupNumber);
+	LOQ_nonzero("process", "h", "GroupNumber", GroupNumber);
+	return ret;
+}
+
+HOOKDEF(WORD, WINAPI, GetActiveProcessorGroupCount,
+	void
+) {
+	WORD ret;
+	ret = Old_GetActiveProcessorGroupCount();
+	LOQ_nonzero("process", "");
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetLogicalProcessorInformation,
+	PVOID Buffer,
+	PDWORD ReturnedLength
+) {
+	BOOL ret;
+	ret = Old_GetLogicalProcessorInformation(Buffer, ReturnedLength);
+	LOQ_bool("process", "ph", "Buffer", Buffer, "ReturnedLength", ReturnedLength);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetLogicalProcessorInformationEx,
+	int RelationshipType,
+	PVOID Buffer,
+	PDWORD ReturnedLength
+) {
+	BOOL ret;
+	ret = Old_GetLogicalProcessorInformationEx(RelationshipType, Buffer, ReturnedLength);
+	LOQ_bool("process", "iph", "RelationshipType", RelationshipType, "Buffer", Buffer, "ReturnedLength", ReturnedLength);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetNumaNodeProcessorMaskEx,
+	USHORT Node,
+	PVOID ProcessorMask
+) {
+	BOOL ret;
+	ret = Old_GetNumaNodeProcessorMaskEx(Node, ProcessorMask);
+	LOQ_bool("process", "hp", "Node", Node, "ProcessorMask", ProcessorMask);
+	return ret;
+}
+
+HOOKDEF(PDWORD, WINAPI, GetSidSubAuthority,
+	PVOID pSid,
+	DWORD nSubAuthority
+) {
+	PDWORD ret;
+	ret = Old_GetSidSubAuthority(pSid, nSubAuthority);
+	LOQ_nonzero("process", "ph", "pSid", pSid, "nSubAuthority", nSubAuthority);
+	return ret;
+}
+
+HOOKDEF(PUCHAR, WINAPI, GetSidSubAuthorityCount,
+	PVOID pSid
+) {
+	PUCHAR ret;
+	ret = Old_GetSidSubAuthorityCount(pSid);
+	LOQ_nonzero("process", "p", "pSid", pSid);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, IsValidSid,
+	PVOID pSid
+) {
+	BOOL ret;
+	ret = Old_IsValidSid(pSid);
+	LOQ_bool("process", "p", "pSid", pSid);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, ProcessIdToSessionId,
+	DWORD dwProcessId,
+	PVOID pSessionId
+) {
+	BOOL ret;
+	ret = Old_ProcessIdToSessionId(dwProcessId, pSessionId);
+	LOQ_bool("process", "hp", "dwProcessId", dwProcessId, "pSessionId", pSessionId);
+	return ret;
+}
+
+HOOKDEF(ULONG, WINAPI, RemoveVectoredExceptionHandler,
+	PVOID Handle
+) {
+	ULONG ret;
+	ret = Old_RemoveVectoredExceptionHandler(Handle);
+	LOQ_nonzero("process", "p", "Handle", Handle);
+	return ret;
+}
+
+HOOKDEF(LPVOID, WINAPI, VirtualAlloc,
+	LPVOID lpAddress,
+	SIZE_T dwSize,
+	DWORD flAllocationType,
+	DWORD flProtect
+) {
+	LPVOID ret;
+	ret = Old_VirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect);
+	LOQ_nonzero("process", "phhh", "lpAddress", lpAddress, "dwSize", dwSize, "flAllocationType", flAllocationType, "flProtect", flProtect);
+	return ret;
+}

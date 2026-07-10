@@ -700,3 +700,61 @@ HOOKDEF(LONG, WINAPI, RegNotifyChangeKeyValue,
 
 	return ret;
 }
+
+
+// ---- all unhooked-classified hooks (auto-generated, sanitized types) ----
+
+HOOKDEF(LSTATUS, WINAPI, RegGetValueA,
+	HKEY hkey,
+	LPCSTR lpSubKey,
+	LPCSTR lpValue,
+	DWORD dwFlags,
+	LPDWORD pdwType,
+	PVOID pvData,
+	LPDWORD pcbData
+) {
+	LSTATUS ret;
+	ret = Old_RegGetValueA(hkey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData);
+	LOQ_zero("registry", "psshhph", "hkey", hkey, "lpSubKey", lpSubKey, "lpValue", lpValue, "dwFlags", dwFlags, "pdwType", pdwType, "pvData", pvData, "pcbData", pcbData);
+	return ret;
+}
+
+HOOKDEF(LSTATUS, WINAPI, RegGetValueW,
+	HKEY hkey,
+	LPCWSTR lpSubKey,
+	LPCWSTR lpValue,
+	DWORD dwFlags,
+	LPDWORD pdwType,
+	PVOID pvData,
+	LPDWORD pcbData
+) {
+	LSTATUS ret;
+	ret = Old_RegGetValueW(hkey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData);
+	LOQ_zero("registry", "puuhhph", "hkey", hkey, "lpSubKey", lpSubKey, "lpValue", lpValue, "dwFlags", dwFlags, "pdwType", pdwType, "pvData", pvData, "pcbData", pcbData);
+	return ret;
+}
+
+HOOKDEF(LSTATUS, WINAPI, RegOpenCurrentUser,
+	PVOID samDesired,
+	PVOID phkResult
+) {
+	LSTATUS ret;
+	ret = Old_RegOpenCurrentUser(samDesired, phkResult);
+	LOQ_zero("registry", "pp", "samDesired", samDesired, "phkResult", phkResult);
+	return ret;
+}
+
+HOOKDEF(LSTATUS, WINAPI, SHRegGetValueW,
+	HKEY hkey,
+	LPCWSTR pszSubKey,
+	LPCWSTR pszValue,
+	PVOID srrfFlags,
+	PVOID pdwType,
+	PVOID pvData,
+	PVOID pcbData
+) {
+	LSTATUS ret;
+	ret = Old_SHRegGetValueW(hkey, pszSubKey, pszValue, srrfFlags, pdwType, pvData, pcbData);
+	LOQ_zero("registry", "puupppp", "hkey", hkey, "pszSubKey", pszSubKey, "pszValue", pszValue, "srrfFlags", srrfFlags, "pdwType", pdwType, "pvData", pvData, "pcbData", pcbData);
+	return ret;
+}

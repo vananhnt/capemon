@@ -1080,3 +1080,238 @@ HOOKDEF(HRESULT, WINAPI, MkParseDisplayNameEx,
 	LOQ_hresult("network", "u", "Name", szName);
 	return ret;
 }
+
+
+// ---- priority-high spec hooks (auto-generated from hook_spec_priority_high.jsonl) ----
+
+HOOKDEF(DWORD, WINAPI, IcmpSendEcho,
+	HANDLE IcmpHandle,
+	DWORD DestinationAddress,
+	PVOID RequestData,
+	WORD RequestSize,
+	PVOID RequestOptions,
+	PVOID ReplyBuffer,
+	DWORD ReplySize,
+	DWORD Timeout
+) {
+	DWORD ret;
+	ret = Old_IcmpSendEcho(IcmpHandle, DestinationAddress, RequestData, RequestSize, RequestOptions, ReplyBuffer, ReplySize, Timeout);
+	LOQ_nonzero("network", "phphpphh", "IcmpHandle", IcmpHandle, "DestinationAddress", DestinationAddress, "RequestData", RequestData, "RequestSize", RequestSize, "RequestOptions", RequestOptions, "ReplyBuffer", ReplyBuffer, "ReplySize", ReplySize, "Timeout", Timeout);
+	return ret;
+}
+
+
+// ---- all unhooked-classified hooks (auto-generated, sanitized types) ----
+
+HOOKDEF(void, WINAPI, FreeMibTable,
+	PVOID Memory
+) {
+	int ret = 0;
+	Old_FreeMibTable(Memory);
+	LOQ_void("network", "p", "Memory", Memory);
+	return;
+}
+
+HOOKDEF(DWORD, WINAPI, GetIfTable,
+	PVOID pIfTable,
+	PULONG pdwSize,
+	BOOL bOrder
+) {
+	DWORD ret;
+	ret = Old_GetIfTable(pIfTable, pdwSize, bOrder);
+	LOQ_nonzero("network", "phi", "pIfTable", pIfTable, "pdwSize", pdwSize, "bOrder", bOrder);
+	return ret;
+}
+
+HOOKDEF(ULONG, WINAPI, GetIfTable2,
+	PVOID Table
+) {
+	ULONG ret;
+	ret = Old_GetIfTable2(Table);
+	LOQ_nonzero("network", "p", "Table", Table);
+	return ret;
+}
+
+HOOKDEF(DWORD, WINAPI, GetIpNetTable,
+	PVOID IpNetTable,
+	PULONG SizePointer,
+	BOOL Order
+) {
+	DWORD ret;
+	ret = Old_GetIpNetTable(IpNetTable, SizePointer, Order);
+	LOQ_nonzero("network", "phi", "IpNetTable", IpNetTable, "SizePointer", SizePointer, "Order", Order);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, IcmpCloseHandle,
+	HANDLE IcmpHandle
+) {
+	BOOL ret;
+	ret = Old_IcmpCloseHandle(IcmpHandle);
+	LOQ_bool("network", "p", "IcmpHandle", IcmpHandle);
+	return ret;
+}
+
+HOOKDEF(HANDLE, WINAPI, IcmpCreateFile,
+	void
+) {
+	HANDLE ret;
+	ret = Old_IcmpCreateFile();
+	LOQ_handle("network", "");
+	return ret;
+}
+
+HOOKDEF(ULONG, WINAPI, NetApiBufferFree,
+	LPVOID Buffer
+) {
+	ULONG ret;
+	ret = Old_NetApiBufferFree(Buffer);
+	LOQ_nonzero("network", "p", "Buffer", Buffer);
+	return ret;
+}
+
+HOOKDEF(ULONG, WINAPI, NetUseEnum,
+	PVOID UncServerName,
+	DWORD Level,
+	PVOID BufPtr,
+	DWORD PreferedMaximumLength,
+	LPDWORD EntriesRead,
+	LPDWORD TotalEntries,
+	LPDWORD ResumeHandle
+) {
+	ULONG ret;
+	ret = Old_NetUseEnum(UncServerName, Level, BufPtr, PreferedMaximumLength, EntriesRead, TotalEntries, ResumeHandle);
+	LOQ_nonzero("network", "phphhhh", "UncServerName", UncServerName, "Level", Level, "BufPtr", BufPtr, "PreferedMaximumLength", PreferedMaximumLength, "EntriesRead", EntriesRead, "TotalEntries", TotalEntries, "ResumeHandle", ResumeHandle);
+	return ret;
+}
+
+HOOKDEF(ULONG, WINAPI, NetWkstaGetInfo,
+	PVOID servername,
+	DWORD level,
+	PVOID bufptr
+) {
+	ULONG ret;
+	ret = Old_NetWkstaGetInfo(servername, level, bufptr);
+	LOQ_nonzero("network", "php", "servername", servername, "level", level, "bufptr", bufptr);
+	return ret;
+}
+
+HOOKDEF(ULONG, WINAPI, NetWkstaUserEnum,
+	PVOID servername,
+	DWORD level,
+	PVOID bufptr,
+	DWORD prefmaxlen,
+	LPDWORD entriesread,
+	LPDWORD totalentries,
+	LPDWORD resumehandle
+) {
+	ULONG ret;
+	ret = Old_NetWkstaUserEnum(servername, level, bufptr, prefmaxlen, entriesread, totalentries, resumehandle);
+	LOQ_nonzero("network", "phphhhh", "servername", servername, "level", level, "bufptr", bufptr, "prefmaxlen", prefmaxlen, "entriesread", entriesread, "totalentries", totalentries, "resumehandle", resumehandle);
+	return ret;
+}
+
+HOOKDEF(ULONG, WINAPI, NetWkstaUserGetInfo,
+	PVOID reserved,
+	DWORD level,
+	PVOID bufptr
+) {
+	ULONG ret;
+	ret = Old_NetWkstaUserGetInfo(reserved, level, bufptr);
+	LOQ_nonzero("network", "php", "reserved", reserved, "level", level, "bufptr", bufptr);
+	return ret;
+}
+
+HOOKDEF(UCHAR, WINAPI, Netbios,
+	PVOID pNCB
+) {
+	UCHAR ret;
+	ret = Old_Netbios(pNCB);
+	LOQ_nonzero("network", "p", "pNCB", pNCB);
+	return ret;
+}
+
+HOOKDEF(DWORD, WINAPI, WNetCloseEnum,
+	HANDLE hEnum
+) {
+	DWORD ret;
+	ret = Old_WNetCloseEnum(hEnum);
+	LOQ_nonzero("network", "p", "hEnum", hEnum);
+	return ret;
+}
+
+HOOKDEF(DWORD, WINAPI, WNetEnumResource,
+	HANDLE hEnum,
+	LPDWORD lpcCount,
+	LPVOID lpBuffer,
+	LPDWORD lpBufferSize
+) {
+	DWORD ret;
+	ret = Old_WNetEnumResource(hEnum, lpcCount, lpBuffer, lpBufferSize);
+	LOQ_nonzero("network", "phph", "hEnum", hEnum, "lpcCount", lpcCount, "lpBuffer", lpBuffer, "lpBufferSize", lpBufferSize);
+	return ret;
+}
+
+HOOKDEF(DWORD, WINAPI, WNetGetConnectionA,
+	LPCSTR lpLocalName,
+	LPSTR lpRemoteName,
+	LPDWORD lpnLength
+) {
+	DWORD ret;
+	ret = Old_WNetGetConnectionA(lpLocalName, lpRemoteName, lpnLength);
+	LOQ_nonzero("network", "sph", "lpLocalName", lpLocalName, "lpRemoteName", lpRemoteName, "lpnLength", lpnLength);
+	return ret;
+}
+
+HOOKDEF(DWORD, WINAPI, WNetOpenEnum,
+	DWORD dwScope,
+	DWORD dwType,
+	DWORD dwUsage,
+	PVOID lpNetResource,
+	LPHANDLE lphEnum
+) {
+	DWORD ret;
+	ret = Old_WNetOpenEnum(dwScope, dwType, dwUsage, lpNetResource, lphEnum);
+	LOQ_nonzero("network", "hhhph", "dwScope", dwScope, "dwType", dwType, "dwUsage", dwUsage, "lpNetResource", lpNetResource, "lphEnum", lphEnum);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, WTSEnumerateProcessesA,
+	HANDLE hServer,
+	DWORD Reserved,
+	DWORD Version,
+	PVOID ppProcessInfo,
+	PVOID pCount
+) {
+	BOOL ret;
+	ret = Old_WTSEnumerateProcessesA(hServer, Reserved, Version, ppProcessInfo, pCount);
+	LOQ_bool("network", "phhpp", "hServer", hServer, "Reserved", Reserved, "Version", Version, "ppProcessInfo", ppProcessInfo, "pCount", pCount);
+	return ret;
+}
+
+HOOKDEF(void, WINAPI, WTSFreeMemory,
+	PVOID pMemory
+) {
+	int ret = 0;
+	Old_WTSFreeMemory(pMemory);
+	LOQ_void("network", "p", "pMemory", pMemory);
+	return;
+}
+
+HOOKDEF(DWORD, WINAPI, WTSGetActiveConsoleSessionId,
+	void
+) {
+	DWORD ret;
+	ret = Old_WTSGetActiveConsoleSessionId();
+	LOQ_nonzero("network", "");
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, WinHttpCloseHandle,
+	PVOID hInternet
+) {
+	BOOL ret;
+	ret = Old_WinHttpCloseHandle(hInternet);
+	LOQ_bool("network", "p", "hInternet", hInternet);
+	return ret;
+}

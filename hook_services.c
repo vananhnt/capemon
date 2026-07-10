@@ -249,3 +249,149 @@ HOOKDEF(BOOL, WINAPI, DeleteService,
 	free(servicename);
 	return ret;
 }
+
+
+HOOKDEF(BOOL, WINAPI, EnumServicesStatusExW,
+	__in      SC_HANDLE hSCManager,
+	__in      SC_ENUM_TYPE InfoLevel,
+	__in      DWORD dwServiceType,
+	__in      DWORD dwServiceState,
+	__out_bcount_opt(cbBufSize) LPBYTE lpServices,
+	__in      DWORD cbBufSize,
+	__out     LPDWORD pcbBytesNeeded,
+	__out     LPDWORD lpServicesReturned,
+	__inout_opt LPDWORD lpResumeHandle,
+	__in_opt  LPCWSTR pszGroupName
+) {
+	BOOL ret = Old_EnumServicesStatusExW(hSCManager, InfoLevel, dwServiceType, dwServiceState, lpServices, cbBufSize, pcbBytesNeeded, lpServicesReturned, lpResumeHandle, pszGroupName);
+
+	WCHAR *serviceList = NULL;
+	if (ret && lpServices && lpServicesReturned && *lpServicesReturned > 0) {
+		LPENUM_SERVICE_STATUS_PROCESSW services = (LPENUM_SERVICE_STATUS_PROCESSW)lpServices;
+		DWORD count = *lpServicesReturned;
+		SIZE_T totalLen = 1;
+		for (DWORD i = 0; i < count; i++) {
+			if (services[i].lpServiceName)
+				totalLen += wcslen(services[i].lpServiceName) + 1;
+		}
+		serviceList = calloc(totalLen, sizeof(WCHAR));
+		if (serviceList) {
+			for (DWORD i = 0; i < count; i++) {
+				if (services[i].lpServiceName) {
+					if (serviceList[0] != L'\0') wcscat(serviceList, L",");
+					wcscat(serviceList, services[i].lpServiceName);
+				}
+			}
+		}
+	}
+
+	LOQ_bool("services", "phiiuu", "ServiceControlManager", hSCManager, "InfoLevel", InfoLevel,
+		"ServiceType", dwServiceType, "ServiceState", dwServiceState, "GroupName", pszGroupName,
+		"Services", serviceList);
+	free(serviceList);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, EnumServicesStatusExA,
+	__in SC_HANDLE hSCManager,
+	__in SC_ENUM_TYPE InfoLevel,
+	__in DWORD dwServiceType,
+	__in DWORD dwServiceState,
+	__out_bcount_opt(cbBufSize) LPBYTE lpServices,
+	__in DWORD cbBufSize,
+	__out LPDWORD pcbBytesNeeded,
+	__out LPDWORD lpServicesReturned,
+	__inout_opt LPDWORD lpResumeHandle,
+	__in_opt LPCSTR pszGroupName
+) {
+	BOOL ret = Old_EnumServicesStatusExA(hSCManager, InfoLevel, dwServiceType, dwServiceState, lpServices, cbBufSize, pcbBytesNeeded, lpServicesReturned, lpResumeHandle, pszGroupName);
+
+	char *serviceList = NULL;
+	if (ret && lpServices && lpServicesReturned && *lpServicesReturned > 0) {
+		LPENUM_SERVICE_STATUS_PROCESSA services = (LPENUM_SERVICE_STATUS_PROCESSA)lpServices;
+		DWORD count = *lpServicesReturned;
+		SIZE_T totalLen = 1;
+		for (DWORD i = 0; i < count; i++) {
+			if (services[i].lpServiceName)
+				totalLen += strlen(services[i].lpServiceName) + 1;
+		}
+		serviceList = calloc(totalLen, sizeof(char));
+		if (serviceList) {
+			for (DWORD i = 0; i < count; i++) {
+				if (services[i].lpServiceName) {
+					if (serviceList[0] != '\0') strcat(serviceList, ",");
+					strcat(serviceList, services[i].lpServiceName);
+				}
+			}
+		}
+	}
+
+	LOQ_bool("services", "phiiss", "ServiceControlManager", hSCManager, "InfoLevel", InfoLevel,
+		"ServiceType", dwServiceType, "ServiceState", dwServiceState, "GroupName", pszGroupName,
+		"Services", serviceList);
+	free(serviceList);
+	return ret;
+}
+
+
+// ---- all unhooked-classified hooks (auto-generated, sanitized types) ----
+
+HOOKDEF(BOOL, WINAPI, CloseServiceHandle,
+	PVOID hSCObject
+) {
+	BOOL ret;
+	ret = Old_CloseServiceHandle(hSCObject);
+	LOQ_bool("services", "p", "hSCObject", hSCObject);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, EnumServicesStatusA,
+	PVOID hSCManager,
+	DWORD dwServiceType,
+	DWORD dwServiceState,
+	PVOID lpServices,
+	DWORD cbBufSize,
+	LPDWORD pcbBytesNeeded,
+	LPDWORD lpServicesReturned,
+	LPDWORD lpResumeHandle
+) {
+	BOOL ret;
+	ret = Old_EnumServicesStatusA(hSCManager, dwServiceType, dwServiceState, lpServices, cbBufSize, pcbBytesNeeded, lpServicesReturned, lpResumeHandle);
+	LOQ_bool("services", "phhphhhh", "hSCManager", hSCManager, "dwServiceType", dwServiceType, "dwServiceState", dwServiceState, "lpServices", lpServices, "cbBufSize", cbBufSize, "pcbBytesNeeded", pcbBytesNeeded, "lpServicesReturned", lpServicesReturned, "lpResumeHandle", lpResumeHandle);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, QueryServiceConfigA,
+	PVOID hService,
+	PVOID lpServiceConfig,
+	DWORD cbBufSize,
+	LPDWORD pcbBytesNeeded
+) {
+	BOOL ret;
+	ret = Old_QueryServiceConfigA(hService, lpServiceConfig, cbBufSize, pcbBytesNeeded);
+	LOQ_bool("services", "pphh", "hService", hService, "lpServiceConfig", lpServiceConfig, "cbBufSize", cbBufSize, "pcbBytesNeeded", pcbBytesNeeded);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, QueryServiceStatus,
+	PVOID hService,
+	PVOID lpServiceStatus
+) {
+	BOOL ret;
+	ret = Old_QueryServiceStatus(hService, lpServiceStatus);
+	LOQ_bool("services", "pp", "hService", hService, "lpServiceStatus", lpServiceStatus);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, QueryServiceStatusEx,
+	PVOID hService,
+	int InfoLevel,
+	LPBYTE lpBuffer,
+	DWORD cbBufSize,
+	LPDWORD pcbBytesNeeded
+) {
+	BOOL ret;
+	ret = Old_QueryServiceStatusEx(hService, InfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
+	LOQ_bool("services", "pihhh", "hService", hService, "InfoLevel", InfoLevel, "lpBuffer", lpBuffer, "cbBufSize", cbBufSize, "pcbBytesNeeded", pcbBytesNeeded);
+	return ret;
+}

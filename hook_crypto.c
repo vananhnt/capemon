@@ -618,3 +618,96 @@ HOOKDEF(NTSTATUS, WINAPI, BCryptEncrypt,
 	LOQ_ntstatus("crypto", "bbhpi", "Input", cbInput, pbInput, "IV", cbIV, pbIV, "Flags", dwFlags, "CryptKey", hKey, "Length", cbInput);
 	return ret;
 }
+
+
+// ---- all unhooked-classified hooks (auto-generated, sanitized types) ----
+
+HOOKDEF(BOOL, WINAPI, CertCloseStore,
+	PVOID hCertStore,
+	DWORD dwFlags
+) {
+	BOOL ret;
+	ret = Old_CertCloseStore(hCertStore, dwFlags);
+	LOQ_bool("crypto", "ph", "hCertStore", hCertStore, "dwFlags", dwFlags);
+	return ret;
+}
+
+HOOKDEF(PVOID, WINAPI, CertFindCertificateInStore,
+	PVOID hCertStore,
+	DWORD dwCertEncodingType,
+	DWORD dwFindFlags,
+	DWORD dwFindType,
+	PVOID pvFindPara,
+	PVOID pPrevCertContext
+) {
+	PVOID ret;
+	ret = Old_CertFindCertificateInStore(hCertStore, dwCertEncodingType, dwFindFlags, dwFindType, pvFindPara, pPrevCertContext);
+	LOQ_nonnull("crypto", "phhhpp", "hCertStore", hCertStore, "dwCertEncodingType", dwCertEncodingType, "dwFindFlags", dwFindFlags, "dwFindType", dwFindType, "pvFindPara", pvFindPara, "pPrevCertContext", pPrevCertContext);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, CertFreeCertificateContext,
+	PVOID pCertContext
+) {
+	BOOL ret;
+	ret = Old_CertFreeCertificateContext(pCertContext);
+	LOQ_bool("crypto", "p", "pCertContext", pCertContext);
+	return ret;
+}
+
+HOOKDEF(DWORD, WINAPI, CertGetNameStringW,
+	PVOID pCertContext,
+	DWORD dwType,
+	DWORD dwFlags,
+	PVOID pvTypePara,
+	LPWSTR pszNameString,
+	DWORD cchNameString
+) {
+	DWORD ret;
+	ret = Old_CertGetNameStringW(pCertContext, dwType, dwFlags, pvTypePara, pszNameString, cchNameString);
+	LOQ_nonzero("crypto", "phhpph", "pCertContext", pCertContext, "dwType", dwType, "dwFlags", dwFlags, "pvTypePara", pvTypePara, "pszNameString", pszNameString, "cchNameString", cchNameString);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, CredEnumerateW,
+	LPCWSTR Filter,
+	DWORD Flags,
+	PVOID Count,
+	PVOID Credential
+) {
+	BOOL ret;
+	ret = Old_CredEnumerateW(Filter, Flags, Count, Credential);
+	LOQ_bool("crypto", "uhpp", "Filter", Filter, "Flags", Flags, "Count", Count, "Credential", Credential);
+	return ret;
+}
+
+HOOKDEF(void, WINAPI, CredFree,
+	PVOID Buffer
+) {
+	int ret = 0;
+	Old_CredFree(Buffer);
+	LOQ_void("crypto", "p", "Buffer", Buffer);
+	return;
+}
+
+HOOKDEF(BOOL, WINAPI, CryptMsgClose,
+	PVOID hCryptMsg
+) {
+	BOOL ret;
+	ret = Old_CryptMsgClose(hCryptMsg);
+	LOQ_bool("crypto", "p", "hCryptMsg", hCryptMsg);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, CryptMsgGetParam,
+	PVOID hCryptMsg,
+	DWORD dwParamType,
+	DWORD dwIndex,
+	PVOID pvData,
+	PVOID pcbData
+) {
+	BOOL ret;
+	ret = Old_CryptMsgGetParam(hCryptMsg, dwParamType, dwIndex, pvData, pcbData);
+	LOQ_bool("crypto", "phhpp", "hCryptMsg", hCryptMsg, "dwParamType", dwParamType, "dwIndex", dwIndex, "pvData", pvData, "pcbData", pcbData);
+	return ret;
+}

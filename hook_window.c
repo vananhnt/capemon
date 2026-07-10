@@ -525,3 +525,776 @@ HOOKDEF(int, WINAPI, MessageBoxTimeoutW,
 		LOQ_zero("windows", "uui", "Text", lpszText, "Caption", lpszCaption, "Timeout", dwTimeout);
 	return ret;
 }
+
+
+// ---- all unhooked-classified hooks (auto-generated, sanitized types) ----
+
+HOOKDEF(BOOL, WINAPI, AddClipboardFormatListener,
+	HWND hwnd
+) {
+	BOOL ret;
+	ret = Old_AddClipboardFormatListener(hwnd);
+	LOQ_bool("misc", "p", "hwnd", hwnd);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, AttachThreadInput,
+	DWORD idAttach,
+	DWORD idAttachTo,
+	BOOL fAttach
+) {
+	BOOL ret;
+	ret = Old_AttachThreadInput(idAttach, idAttachTo, fAttach);
+	LOQ_bool("misc", "hhi", "idAttach", idAttach, "idAttachTo", idAttachTo, "fAttach", fAttach);
+	return ret;
+}
+
+HOOKDEF(LRESULT, WINAPI, CallNextHookEx,
+	HHOOK hhk,
+	int nCode,
+	WPARAM wParam,
+	LPARAM lParam
+) {
+	LRESULT ret;
+	ret = Old_CallNextHookEx(hhk, nCode, wParam, lParam);
+	LOQ_nonzero("misc", "pihh", "hhk", hhk, "nCode", nCode, "wParam", wParam, "lParam", lParam);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, ChangeClipboardChain,
+	HWND hWndRemove,
+	HWND hWndNewNext
+) {
+	BOOL ret;
+	ret = Old_ChangeClipboardChain(hWndRemove, hWndNewNext);
+	LOQ_bool("misc", "pp", "hWndRemove", hWndRemove, "hWndNewNext", hWndNewNext);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, CloseClipboard,
+	void
+) {
+	BOOL ret;
+	ret = Old_CloseClipboard();
+	LOQ_bool("misc", "");
+	return ret;
+}
+
+HOOKDEF(LRESULT, WINAPI, DefWindowProc,
+	HWND hWnd,
+	UINT Msg,
+	WPARAM wParam,
+	LPARAM lParam
+) {
+	LRESULT ret;
+	ret = Old_DefWindowProc(hWnd, Msg, wParam, lParam);
+	LOQ_nonzero("misc", "phhh", "hWnd", hWnd, "Msg", Msg, "wParam", wParam, "lParam", lParam);
+	return ret;
+}
+
+HOOKDEF(LRESULT, WINAPI, DefWindowProcA,
+	HWND hWnd,
+	UINT Msg,
+	WPARAM wParam,
+	LPARAM lParam
+) {
+	LRESULT ret;
+	ret = Old_DefWindowProcA(hWnd, Msg, wParam, lParam);
+	LOQ_nonzero("misc", "phhh", "hWnd", hWnd, "Msg", Msg, "wParam", wParam, "lParam", lParam);
+	return ret;
+}
+
+HOOKDEF(LRESULT, WINAPI, DefWindowProcW,
+	HWND hWnd,
+	UINT Msg,
+	WPARAM wParam,
+	LPARAM lParam
+) {
+	LRESULT ret;
+	ret = Old_DefWindowProcW(hWnd, Msg, wParam, lParam);
+	LOQ_nonzero("misc", "phhh", "hWnd", hWnd, "Msg", Msg, "wParam", wParam, "lParam", lParam);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, DestroyWindow,
+	HWND hWnd
+) {
+	BOOL ret;
+	ret = Old_DestroyWindow(hWnd);
+	LOQ_bool("misc", "p", "hWnd", hWnd);
+	return ret;
+}
+
+HOOKDEF(LRESULT, WINAPI, DispatchMessage,
+	PVOID lpMsg
+) {
+	LRESULT ret;
+	ret = Old_DispatchMessage(lpMsg);
+	LOQ_nonzero("misc", "p", "lpMsg", lpMsg);
+	return ret;
+}
+
+HOOKDEF(LRESULT, WINAPI, DispatchMessageA,
+	PVOID lpMsg
+) {
+	LRESULT ret;
+	ret = Old_DispatchMessageA(lpMsg);
+	LOQ_nonzero("misc", "p", "lpMsg", lpMsg);
+	return ret;
+}
+
+HOOKDEF(LRESULT, WINAPI, DispatchMessageW,
+	PVOID lpMsg
+) {
+	LRESULT ret;
+	ret = Old_DispatchMessageW(lpMsg);
+	LOQ_nonzero("misc", "p", "lpMsg", lpMsg);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, EndDialog,
+	HWND hDlg,
+	INT_PTR nResult
+) {
+	BOOL ret;
+	ret = Old_EndDialog(hDlg, nResult);
+	LOQ_bool("misc", "pi", "hDlg", hDlg, "nResult", nResult);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, EnumDisplaySettings,
+	LPCTSTR lpszDeviceName,
+	DWORD iModeNum,
+	PVOID lpDevMode
+) {
+	BOOL ret;
+	ret = Old_EnumDisplaySettings(lpszDeviceName, iModeNum, lpDevMode);
+	LOQ_bool("misc", "shp", "lpszDeviceName", lpszDeviceName, "iModeNum", iModeNum, "lpDevMode", lpDevMode);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, EnumDisplaySettingsA,
+	LPCSTR lpszDeviceName,
+	DWORD iModeNum,
+	PVOID lpDevMode
+) {
+	BOOL ret;
+	ret = Old_EnumDisplaySettingsA(lpszDeviceName, iModeNum, lpDevMode);
+	LOQ_bool("misc", "shp", "lpszDeviceName", lpszDeviceName, "iModeNum", iModeNum, "lpDevMode", lpDevMode);
+	return ret;
+}
+
+HOOKDEF(DWORD, WINAPI, FormatMessageA,
+	DWORD dwFlags,
+	LPCVOID lpSource,
+	DWORD dwMessageId,
+	DWORD dwLanguageId,
+	LPSTR lpBuffer,
+	DWORD nSize,
+	PVOID Arguments
+) {
+	DWORD ret;
+	ret = Old_FormatMessageA(dwFlags, lpSource, dwMessageId, dwLanguageId, lpBuffer, nSize, Arguments);
+	LOQ_nonzero("misc", "hphhphp", "dwFlags", dwFlags, "lpSource", lpSource, "dwMessageId", dwMessageId, "dwLanguageId", dwLanguageId, "lpBuffer", lpBuffer, "nSize", nSize, "Arguments", Arguments);
+	return ret;
+}
+
+HOOKDEF(HWND, WINAPI, GetAncestor,
+	HWND hwnd,
+	UINT gaFlags
+) {
+	HWND ret;
+	ret = Old_GetAncestor(hwnd, gaFlags);
+	LOQ_nonzero("misc", "ph", "hwnd", hwnd, "gaFlags", gaFlags);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetClassInfoExA,
+	HINSTANCE hInstance,
+	LPCSTR lpszClass,
+	PVOID lpwcx
+) {
+	BOOL ret;
+	ret = Old_GetClassInfoExA(hInstance, lpszClass, lpwcx);
+	LOQ_bool("misc", "psp", "hInstance", hInstance, "lpszClass", lpszClass, "lpwcx", lpwcx);
+	return ret;
+}
+
+HOOKDEF(int, WINAPI, GetClassName,
+	HWND hWnd,
+	LPTSTR lpClassName,
+	int nMaxCount
+) {
+	int ret;
+	ret = Old_GetClassName(hWnd, lpClassName, nMaxCount);
+	LOQ_nonzero("misc", "phi", "hWnd", hWnd, "lpClassName", lpClassName, "nMaxCount", nMaxCount);
+	return ret;
+}
+
+HOOKDEF(HWND, WINAPI, GetClipboardOwner,
+	void
+) {
+	HWND ret;
+	ret = Old_GetClipboardOwner();
+	LOQ_nonzero("misc", "");
+	return ret;
+}
+
+HOOKDEF(DWORD, WINAPI, GetClipboardSequenceNumber,
+	void
+) {
+	DWORD ret;
+	ret = Old_GetClipboardSequenceNumber();
+	LOQ_nonzero("misc", "");
+	return ret;
+}
+
+HOOKDEF(HWND, WINAPI, GetConsoleWindow,
+	void
+) {
+	HWND ret;
+	ret = Old_GetConsoleWindow();
+	LOQ_nonzero("misc", "");
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetCursorInfo,
+	PVOID pci
+) {
+	BOOL ret;
+	ret = Old_GetCursorInfo(pci);
+	LOQ_bool("misc", "p", "pci", pci);
+	return ret;
+}
+
+HOOKDEF(HDC, WINAPI, GetDC,
+	HWND hWnd
+) {
+	HDC ret;
+	ret = Old_GetDC(hWnd);
+	LOQ_nonzero("misc", "p", "hWnd", hWnd);
+	return ret;
+}
+
+HOOKDEF(HWND, WINAPI, GetDesktopWindow,
+	void
+) {
+	HWND ret;
+	ret = Old_GetDesktopWindow();
+	LOQ_nonzero("misc", "");
+	return ret;
+}
+
+HOOKDEF(UINT, WINAPI, GetDoubleClickTime,
+	void
+) {
+	UINT ret;
+	ret = Old_GetDoubleClickTime();
+	LOQ_nonzero("misc", "");
+	return ret;
+}
+
+HOOKDEF(HWND, WINAPI, GetForegroundWindow,
+	void
+) {
+	HWND ret;
+	ret = Old_GetForegroundWindow();
+	LOQ_nonzero("misc", "");
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetGUIThreadInfo,
+	DWORD idThread,
+	PVOID pgui
+) {
+	BOOL ret;
+	ret = Old_GetGUIThreadInfo(idThread, pgui);
+	LOQ_bool("misc", "hp", "idThread", idThread, "pgui", pgui);
+	return ret;
+}
+
+HOOKDEF(SHORT, WINAPI, GetKeyState,
+	int nVirtKey
+) {
+	SHORT ret;
+	ret = Old_GetKeyState(nVirtKey);
+	LOQ_nonzero("misc", "i", "nVirtKey", nVirtKey);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetKeyboardLayoutNameA,
+	LPSTR pwszKLID
+) {
+	BOOL ret;
+	ret = Old_GetKeyboardLayoutNameA(pwszKLID);
+	LOQ_bool("misc", "p", "pwszKLID", pwszKLID);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetKeyboardState,
+	PBYTE lpKeyState
+) {
+	BOOL ret;
+	ret = Old_GetKeyboardState(lpKeyState);
+	LOQ_bool("misc", "h", "lpKeyState", lpKeyState);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetMessage,
+	LPMSG lpMsg,
+	HWND hWnd,
+	UINT wMsgFilterMin,
+	UINT wMsgFilterMax
+) {
+	BOOL ret;
+	ret = Old_GetMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
+	LOQ_bool("misc", "hphh", "lpMsg", lpMsg, "hWnd", hWnd, "wMsgFilterMin", wMsgFilterMin, "wMsgFilterMax", wMsgFilterMax);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetMessageA,
+	LPMSG lpMsg,
+	HWND hWnd,
+	UINT wMsgFilterMin,
+	UINT wMsgFilterMax
+) {
+	BOOL ret;
+	ret = Old_GetMessageA(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
+	LOQ_bool("misc", "hphh", "lpMsg", lpMsg, "hWnd", hWnd, "wMsgFilterMin", wMsgFilterMin, "wMsgFilterMax", wMsgFilterMax);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetMessageW,
+	LPMSG lpMsg,
+	HWND hWnd,
+	UINT wMsgFilterMin,
+	UINT wMsgFilterMax
+) {
+	BOOL ret;
+	ret = Old_GetMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax);
+	LOQ_bool("misc", "hphh", "lpMsg", lpMsg, "hWnd", hWnd, "wMsgFilterMin", wMsgFilterMin, "wMsgFilterMax", wMsgFilterMax);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetMonitorInfo,
+	HMONITOR hMonitor,
+	PVOID lpmi
+) {
+	BOOL ret;
+	ret = Old_GetMonitorInfo(hMonitor, lpmi);
+	LOQ_bool("misc", "pp", "hMonitor", hMonitor, "lpmi", lpmi);
+	return ret;
+}
+
+HOOKDEF(UINT, WINAPI, GetRawInputBuffer,
+	PVOID pData,
+	PUINT pcbSize,
+	UINT cbSizeHeader
+) {
+	UINT ret;
+	ret = Old_GetRawInputBuffer(pData, pcbSize, cbSizeHeader);
+	LOQ_nonzero("misc", "phh", "pData", pData, "pcbSize", pcbSize, "cbSizeHeader", cbSizeHeader);
+	return ret;
+}
+
+HOOKDEF(UINT, WINAPI, GetRawInputData,
+	HRAWINPUT hRawInput,
+	UINT uiCommand,
+	LPVOID pData,
+	PUINT pcbSize,
+	UINT cbSizeHeader
+) {
+	UINT ret;
+	ret = Old_GetRawInputData(hRawInput, uiCommand, pData, pcbSize, cbSizeHeader);
+	LOQ_nonzero("misc", "phphh", "hRawInput", hRawInput, "uiCommand", uiCommand, "pData", pData, "pcbSize", pcbSize, "cbSizeHeader", cbSizeHeader);
+	return ret;
+}
+
+HOOKDEF(HWND, WINAPI, GetWindow,
+	HWND hWnd,
+	UINT uCmd
+) {
+	HWND ret;
+	ret = Old_GetWindow(hWnd, uCmd);
+	LOQ_nonzero("misc", "ph", "hWnd", hWnd, "uCmd", uCmd);
+	return ret;
+}
+
+HOOKDEF(LONG_PTR, WINAPI, GetWindowLongPtr,
+	HWND hWnd,
+	int nIndex
+) {
+	LONG_PTR ret;
+	ret = Old_GetWindowLongPtr(hWnd, nIndex);
+	LOQ_nonzero("misc", "pi", "hWnd", hWnd, "nIndex", nIndex);
+	return ret;
+}
+
+HOOKDEF(LONG_PTR, WINAPI, GetWindowLongPtrA,
+	HWND hWnd,
+	int nIndex
+) {
+	LONG_PTR ret;
+	ret = Old_GetWindowLongPtrA(hWnd, nIndex);
+	LOQ_nonzero("misc", "pi", "hWnd", hWnd, "nIndex", nIndex);
+	return ret;
+}
+
+HOOKDEF(LONG_PTR, WINAPI, GetWindowLongPtrW,
+	HWND hWnd,
+	int nIndex
+) {
+	LONG_PTR ret;
+	ret = Old_GetWindowLongPtrW(hWnd, nIndex);
+	LOQ_nonzero("misc", "pi", "hWnd", hWnd, "nIndex", nIndex);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetWindowRect,
+	HWND hWnd,
+	LPRECT lpRect
+) {
+	BOOL ret;
+	ret = Old_GetWindowRect(hWnd, lpRect);
+	LOQ_bool("misc", "ph", "hWnd", hWnd, "lpRect", lpRect);
+	return ret;
+}
+
+HOOKDEF(int, WINAPI, GetWindowText,
+	HWND hWnd,
+	LPTSTR lpString,
+	int nMaxCount
+) {
+	int ret;
+	ret = Old_GetWindowText(hWnd, lpString, nMaxCount);
+	LOQ_nonzero("misc", "phi", "hWnd", hWnd, "lpString", lpString, "nMaxCount", nMaxCount);
+	return ret;
+}
+
+HOOKDEF(int, WINAPI, GetWindowTextA,
+	HWND hWnd,
+	LPSTR lpString,
+	int nMaxCount
+) {
+	int ret;
+	ret = Old_GetWindowTextA(hWnd, lpString, nMaxCount);
+	LOQ_nonzero("misc", "ppi", "hWnd", hWnd, "lpString", lpString, "nMaxCount", nMaxCount);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, IsWindowVisible,
+	HWND hWnd
+) {
+	BOOL ret;
+	ret = Old_IsWindowVisible(hWnd);
+	LOQ_bool("misc", "p", "hWnd", hWnd);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, KillTimer,
+	HWND hWnd,
+	UINT_PTR uIDEvent
+) {
+	BOOL ret;
+	ret = Old_KillTimer(hWnd, uIDEvent);
+	LOQ_bool("misc", "ph", "hWnd", hWnd, "uIDEvent", uIDEvent);
+	return ret;
+}
+
+HOOKDEF(HCURSOR, WINAPI, LoadCursor,
+	HINSTANCE hInstance,
+	LPCTSTR lpCursorName
+) {
+	HCURSOR ret;
+	ret = Old_LoadCursor(hInstance, lpCursorName);
+	LOQ_nonzero("misc", "ps", "hInstance", hInstance, "lpCursorName", lpCursorName);
+	return ret;
+}
+
+HOOKDEF(HCURSOR, WINAPI, LoadCursorW,
+	HINSTANCE hInstance,
+	LPCWSTR lpCursorName
+) {
+	HCURSOR ret;
+	ret = Old_LoadCursorW(hInstance, lpCursorName);
+	LOQ_nonzero("misc", "pu", "hInstance", hInstance, "lpCursorName", lpCursorName);
+	return ret;
+}
+
+HOOKDEF(HICON, WINAPI, LoadIconW,
+	HINSTANCE hInstance,
+	LPCWSTR lpIconName
+) {
+	HICON ret;
+	ret = Old_LoadIconW(hInstance, lpIconName);
+	LOQ_nonzero("misc", "pu", "hInstance", hInstance, "lpIconName", lpIconName);
+	return ret;
+}
+
+HOOKDEF(HMONITOR, WINAPI, MonitorFromWindow,
+	HWND hwnd,
+	DWORD dwFlags
+) {
+	HMONITOR ret;
+	ret = Old_MonitorFromWindow(hwnd, dwFlags);
+	LOQ_nonzero("misc", "ph", "hwnd", hwnd, "dwFlags", dwFlags);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, OpenClipboard,
+	HWND hWndNewOwner
+) {
+	BOOL ret;
+	ret = Old_OpenClipboard(hWndNewOwner);
+	LOQ_bool("misc", "p", "hWndNewOwner", hWndNewOwner);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, PeekMessage,
+	LPMSG lpMsg,
+	HWND hWnd,
+	UINT wMsgFilterMin,
+	UINT wMsgFilterMax,
+	UINT wRemoveMsg
+) {
+	BOOL ret;
+	ret = Old_PeekMessage(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+	LOQ_bool("misc", "hphhh", "lpMsg", lpMsg, "hWnd", hWnd, "wMsgFilterMin", wMsgFilterMin, "wMsgFilterMax", wMsgFilterMax, "wRemoveMsg", wRemoveMsg);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, PeekMessageA,
+	LPMSG lpMsg,
+	HWND hWnd,
+	UINT wMsgFilterMin,
+	UINT wMsgFilterMax,
+	UINT wRemoveMsg
+) {
+	BOOL ret;
+	ret = Old_PeekMessageA(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+	LOQ_bool("misc", "hphhh", "lpMsg", lpMsg, "hWnd", hWnd, "wMsgFilterMin", wMsgFilterMin, "wMsgFilterMax", wMsgFilterMax, "wRemoveMsg", wRemoveMsg);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, PeekMessageW,
+	LPMSG lpMsg,
+	HWND hWnd,
+	UINT wMsgFilterMin,
+	UINT wMsgFilterMax,
+	UINT wRemoveMsg
+) {
+	BOOL ret;
+	ret = Old_PeekMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+	LOQ_bool("misc", "hphhh", "lpMsg", lpMsg, "hWnd", hWnd, "wMsgFilterMin", wMsgFilterMin, "wMsgFilterMax", wMsgFilterMax, "wRemoveMsg", wRemoveMsg);
+	return ret;
+}
+
+HOOKDEF(void, WINAPI, PostQuitMessage,
+	int nExitCode
+) {
+	int ret = 0;
+	Old_PostQuitMessage(nExitCode);
+	LOQ_void("misc", "i", "nExitCode", nExitCode);
+	return;
+}
+
+HOOKDEF(ATOM, WINAPI, RegisterClassA,
+	PVOID lpWndClass
+) {
+	ATOM ret;
+	ret = Old_RegisterClassA(lpWndClass);
+	LOQ_nonzero("misc", "p", "lpWndClass", lpWndClass);
+	return ret;
+}
+
+HOOKDEF(ATOM, WINAPI, RegisterClassExA,
+	PVOID unnamedParam1
+) {
+	ATOM ret;
+	ret = Old_RegisterClassExA(unnamedParam1);
+	LOQ_nonzero("misc", "p", "unnamedParam1", unnamedParam1);
+	return ret;
+}
+
+HOOKDEF(ATOM, WINAPI, RegisterClassExW,
+	PVOID unnamedParam1
+) {
+	ATOM ret;
+	ret = Old_RegisterClassExW(unnamedParam1);
+	LOQ_nonzero("misc", "p", "unnamedParam1", unnamedParam1);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, RegisterHotKey,
+	HWND hWnd,
+	int id,
+	UINT fsModifiers,
+	UINT vk
+) {
+	BOOL ret;
+	ret = Old_RegisterHotKey(hWnd, id, fsModifiers, vk);
+	LOQ_bool("misc", "pihh", "hWnd", hWnd, "id", id, "fsModifiers", fsModifiers, "vk", vk);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, RegisterRawInputDevices,
+	PVOID pRawInputDevices,
+	UINT uiNumDevices,
+	UINT cbSize
+) {
+	BOOL ret;
+	ret = Old_RegisterRawInputDevices(pRawInputDevices, uiNumDevices, cbSize);
+	LOQ_bool("misc", "phh", "pRawInputDevices", pRawInputDevices, "uiNumDevices", uiNumDevices, "cbSize", cbSize);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, RegisterShellHookWindow,
+	HWND hwnd
+) {
+	BOOL ret;
+	ret = Old_RegisterShellHookWindow(hwnd);
+	LOQ_bool("misc", "p", "hwnd", hwnd);
+	return ret;
+}
+
+HOOKDEF(UINT, WINAPI, RegisterWindowMessageA,
+	LPCSTR lpString
+) {
+	UINT ret;
+	ret = Old_RegisterWindowMessageA(lpString);
+	LOQ_nonzero("misc", "s", "lpString", lpString);
+	return ret;
+}
+
+HOOKDEF(int, WINAPI, ReleaseDC,
+	HWND hWnd,
+	HDC hDC
+) {
+	int ret;
+	ret = Old_ReleaseDC(hWnd, hDC);
+	LOQ_nonzero("misc", "pp", "hWnd", hWnd, "hDC", hDC);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, RemoveClipboardFormatListener,
+	HWND hwnd
+) {
+	BOOL ret;
+	ret = Old_RemoveClipboardFormatListener(hwnd);
+	LOQ_bool("misc", "p", "hwnd", hwnd);
+	return ret;
+}
+
+HOOKDEF(HWND, WINAPI, SetClipboardViewer,
+	HWND hWndNewViewer
+) {
+	HWND ret;
+	ret = Old_SetClipboardViewer(hWndNewViewer);
+	LOQ_nonzero("misc", "p", "hWndNewViewer", hWndNewViewer);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, SetLayeredWindowAttributes,
+	HWND hwnd,
+	COLORREF crKey,
+	BYTE bAlpha,
+	DWORD dwFlags
+) {
+	BOOL ret;
+	ret = Old_SetLayeredWindowAttributes(hwnd, crKey, bAlpha, dwFlags);
+	LOQ_bool("misc", "phhh", "hwnd", hwnd, "crKey", crKey, "bAlpha", bAlpha, "dwFlags", dwFlags);
+	return ret;
+}
+
+HOOKDEF(UINT_PTR, WINAPI, SetTimer,
+	HWND hWnd,
+	UINT_PTR nIDEvent,
+	UINT uElapse,
+	PVOID lpTimerFunc
+) {
+	UINT_PTR ret;
+	ret = Old_SetTimer(hWnd, nIDEvent, uElapse, lpTimerFunc);
+	LOQ_nonzero("misc", "phhp", "hWnd", hWnd, "nIDEvent", nIDEvent, "uElapse", uElapse, "lpTimerFunc", lpTimerFunc);
+	return ret;
+}
+
+HOOKDEF(HWINEVENTHOOK, WINAPI, SetWinEventHook,
+	DWORD eventMin,
+	DWORD eventMax,
+	HMODULE hmodWinEventProc,
+	PVOID pfnWinEventProc,
+	DWORD idProcess,
+	DWORD idThread,
+	DWORD dwFlags
+) {
+	HWINEVENTHOOK ret;
+	ret = Old_SetWinEventHook(eventMin, eventMax, hmodWinEventProc, pfnWinEventProc, idProcess, idThread, dwFlags);
+	LOQ_nonzero("misc", "hhpphhh", "eventMin", eventMin, "eventMax", eventMax, "hmodWinEventProc", hmodWinEventProc, "pfnWinEventProc", pfnWinEventProc, "idProcess", idProcess, "idThread", idThread, "dwFlags", dwFlags);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, ShowWindow,
+	HWND hWnd,
+	int nCmdShow
+) {
+	BOOL ret;
+	ret = Old_ShowWindow(hWnd, nCmdShow);
+	LOQ_bool("misc", "pi", "hWnd", hWnd, "nCmdShow", nCmdShow);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, TranslateMessage,
+	PVOID lpMsg
+) {
+	BOOL ret;
+	ret = Old_TranslateMessage(lpMsg);
+	LOQ_bool("misc", "p", "lpMsg", lpMsg);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, UnhookWinEvent,
+	HWINEVENTHOOK hWinEventHook
+) {
+	BOOL ret;
+	ret = Old_UnhookWinEvent(hWinEventHook);
+	LOQ_bool("misc", "p", "hWinEventHook", hWinEventHook);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, UnregisterClassA,
+	LPCSTR lpClassName,
+	HINSTANCE hInstance
+) {
+	BOOL ret;
+	ret = Old_UnregisterClassA(lpClassName, hInstance);
+	LOQ_bool("misc", "sp", "lpClassName", lpClassName, "hInstance", hInstance);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, UnregisterClassW,
+	LPCWSTR lpClassName,
+	HINSTANCE hInstance
+) {
+	BOOL ret;
+	ret = Old_UnregisterClassW(lpClassName, hInstance);
+	LOQ_bool("misc", "up", "lpClassName", lpClassName, "hInstance", hInstance);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, UpdateWindow,
+	HWND hWnd
+) {
+	BOOL ret;
+	ret = Old_UpdateWindow(hWnd);
+	LOQ_bool("misc", "p", "hWnd", hWnd);
+	return ret;
+}
+
+HOOKDEF(HWND, WINAPI, WindowFromPoint,
+	POINT Point
+) {
+	HWND ret;
+	ret = Old_WindowFromPoint(Point);
+	LOQ_nonzero("misc", "h", "Point", Point);
+	return ret;
+}
