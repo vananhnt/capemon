@@ -1,9 +1,9 @@
 name: MSBuild
 on:
   push:
-    branches: [ "baseline" ]
+    branches: [ "baseline", "*-automated" ]
   pull_request:
-    branches: [ "baseline" ]
+    branches: [ "baseline", "*-automated" ]
 env:
   BUILD_CONFIGURATION: Release
   SOLUTION_FILE_PATH: capemon.sln
