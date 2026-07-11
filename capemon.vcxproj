@@ -254,7 +254,7 @@
     <ClCompile Include="hook_file.c" />
     <ClCompile Include="hook_lang.c" />
     <ClCompile Include="hook_misc.c" />
-    <ClCompile Include="hook_sage.c" />
+    <ClCompile Include="hook_mirage.c" />
     <ClCompile Include="hook_network.c" />
     <ClCompile Include="hook_process.c" />
     <ClCompile Include="hook_reg.c" />
