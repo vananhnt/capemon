@@ -1,7 +1,7 @@
 name: MSBuild
 on:
   push:
-    branches: [ "MIRAGE" ]
+    branches: [ "MIRAGE", "*-automated" ]
   pull_request:
     branches: [ "MIRAGE" ]
 env:
