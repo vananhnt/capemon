@@ -9,6 +9,12 @@
 #include "log.h"
 #include "config.h"
 
+/* Constant offset (in seconds) applied to forged wall-clock/perf-counter
+ * reads by the GetSystemTimePreciseAsFileTime and QueryPerformanceCounter
+ * stealth hooks below, so a sample's own clock-skew self-checks see a
+ * consistent forged delta rather than the real elapsed analysis time. */
+double g_mirage_clock_skew_offset = 0.0;
+
 /* shared handle -> forged-entry-count tracking table used by the
  * FindFirstFileA (Pictures) and FindNextFileA (Documents) stealth hooks
  * below: FindFirstFileA tags a handle when it opens a path under the
@@ -759,8 +765,7 @@ static void FindNextFileA_ForgeEntry(LPWIN32_FIND_DATAA lpFindFileData, unsigned
 
         HOOKDEF(void, WINAPI, GetSystemTimePreciseAsFileTime, LPFILETIME lpSystemTimeAsFileTime)
         {
-            extern double g_mirage_clock_skew_offset;
-	lasterror_t lasterror;
+            lasterror_t lasterror;
 	ULARGE_INTEGER skewed;
 
 	Old_GetSystemTimePreciseAsFileTime(lpSystemTimeAsFileTime);
@@ -782,9 +787,7 @@ static void FindNextFileA_ForgeEntry(LPWIN32_FIND_DATAA lpFindFileData, unsigned
 
         HOOKDEF(BOOL, WINAPI, QueryPerformanceCounter, LARGE_INTEGER *lpPerformanceCount)
         {
-            extern double g_mirage_clock_skew_offset;
-
-	BOOL ret;
+            BOOL ret;
 	lasterror_t lasterror;
 	LARGE_INTEGER freq;
 	ULONGLONG skewed;
