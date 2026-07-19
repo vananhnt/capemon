@@ -101,14 +101,18 @@ HOOKDEF(HRESULT, WINAPI, WMI_Get,
 	_Out_		VARIANT	*pVal,
 	_Out_opt_	CIMTYPE	*pType,
 	_Out_opt_	LONG	*plFlavor
-) {
-	HRESULT ret;
+)
+{
+HRESULT ret;
 	WCHAR szClassName[256] = L"";
 	if (wszName && _wcsicmp(wszName, L"__CLASS") != 0) {
 		VARIANT classVariant;
+		IWbemClassObject* pWmiObject;
+		HRESULT hr;
+
 		VariantInit(&classVariant);
-		IWbemClassObject* pWmiObject = (IWbemClassObject*)_this;
-		HRESULT hr = pWmiObject->lpVtbl->Get(pWmiObject, L"__CLASS", 0, &classVariant, NULL, NULL);
+		pWmiObject = (IWbemClassObject*)_this;
+		hr = pWmiObject->lpVtbl->Get(pWmiObject, L"__CLASS", 0, &classVariant, NULL, NULL);
 		if (SUCCEEDED(hr) && classVariant.vt == VT_BSTR) {
 			wcscpy_s(szClassName, _countof(szClassName), classVariant.bstrVal);
 		}
@@ -145,44 +149,15 @@ HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_Out_		VARIANT	*pVal,
 	_Out_opt_	CIMTYPE	*pType,
 	_Out_opt_	LONG	*plFlavor
-) {
-	HRESULT ret = Old_WMI_Next(_this, lFlags, strName, pVal, pType, plFlavor);
+)
+{
+HRESULT ret;
 
-	// Return early for some cases we don't want to log / spoof
-	if (ret != S_OK)
-		return ret;
+	ret = Old_WMI_Next(_this, lTimeout, uCount, ppObjects, puReturned);
 
-	if (!pVal)
-		return ret;
+	LOQ_hresult("wmi", "llLP", "Timeout", lTimeout, "Count", uCount,
+		"Returned", puReturned, "Objects", ppObjects);
 
-	if (pVal->vt == VT_NULL)
-		return ret;
-
-	if (!strName || !*strName)
-		return ret;
-
-	// If all is well at this point, we should do the spoofs
-	lasterror_t lasterror;
-	get_lasterrors(&lasterror);
-	VARIANT classVariant;
-	VariantInit(&classVariant);
-
-	__try {
-		IWbemClassObject* pWmiObject = (IWbemClassObject*)_this;
-		HRESULT hr = pWmiObject->lpVtbl->Get(pWmiObject, L"__CLASS", 0, &classVariant, NULL, NULL);
-		WCHAR szClassName[256] = L"";
-		if (SUCCEEDED(hr) && classVariant.vt == VT_BSTR) {
-			wcscpy_s(szClassName, _countof(szClassName), classVariant.bstrVal);
-		}
-		SpoofWmiData(szClassName, *strName, pVal);
-		LOQ_hresult("system", "unu", "Name", *strName, "Value", pVal, "Class", szClassName);
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {
-		LOQ_hresult("system", "un", "Name", *strName, "Value", pVal);
-	}
-
-	VariantClear(&classVariant);
-	set_lasterrors(&lasterror);
 	return ret;
 }
 
@@ -193,10 +168,32 @@ HOOKDEF(HRESULT, WINAPI, WMI_ExecQuery,
 	_In_	LONG					lFlags,
 	_In_	IWbemContext			*pCtx,
 	_Out_	IEnumWbemClassObject	**ppEnum
-) {
+)
+{
+static PVOID g_mirage_cim_memory_enum_tags[16];
+	static unsigned int g_mirage_cim_memory_tag_next;
 	HRESULT ret = 0;
+	lasterror_t lasterror;
+
 	LOQ_hresult("system", "uu", "Query", strQuery, "QueryLanguage", strQueryLanguage);
-	return Old_WMI_ExecQuery(_this, strQueryLanguage, strQuery, lFlags, pCtx, ppEnum);
+	ret = Old_WMI_ExecQuery(_this, strQueryLanguage, strQuery, lFlags, pCtx, ppEnum);
+
+	if (!g_config.no_stealth && SUCCEEDED(ret) && ppEnum != NULL && *ppEnum != NULL &&
+			strQuery != NULL && wcsstr(strQuery, L"CIM_Memory") != NULL) {
+		get_lasterrors(&lasterror);
+
+		/* record this enumerator instance in the SpoofWmiData dispatch
+		 * tag table so the WMI_Next hook synthesizes a plausible
+		 * memory-module instance instead of passing through the
+		 * sandbox's (usually empty) real CIM_Memory result */
+		g_mirage_cim_memory_enum_tags[g_mirage_cim_memory_tag_next %
+			(sizeof(g_mirage_cim_memory_enum_tags) / sizeof(g_mirage_cim_memory_enum_tags[0]))] = (PVOID)*ppEnum;
+		g_mirage_cim_memory_tag_next++;
+
+		set_lasterrors(&lasterror);
+	}
+
+	return ret;
 }
 
 HOOKDEF(HRESULT, WINAPI, WMI_ExecQueryAsync,

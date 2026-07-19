@@ -66,12 +66,58 @@ HOOKDEF(HANDLE, WINAPI, CreateToolhelp32Snapshot,
 HOOKDEF(BOOL, WINAPI, Process32NextW,
 	__in HANDLE hSnapshot,
 	__out LPPROCESSENTRY32W lppe
-	) {
-	BOOL ret = Old_Process32NextW(hSnapshot, lppe);
+	)
+{
+static const char *g_mirage_blacklisted_procs[] = {
+		"vboxservice.exe",
+		"vmtoolsd.exe",
+		"vmwaretray.exe",
+		"xenservice.exe",
+	};
+	BOOL ret;
+	lasterror_t lasterror;
+	char exe_name[MAX_PATH * 2];
+	unsigned int i;
+	unsigned int blacklist_count;
+	int is_blacklisted;
+
+	ret = Old_Process32NextW(hSnapshot, lppe);
 
 	/* skip returning protected processes */
 	while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
 		ret = Old_Process32NextW(hSnapshot, lppe);
+
+	if (!g_config.no_stealth) {
+		blacklist_count = sizeof(g_mirage_blacklisted_procs) / sizeof(g_mirage_blacklisted_procs[0]);
+
+		while (ret && lppe != NULL) {
+			get_lasterrors(&lasterror);
+
+			exe_name[0] = '\0';
+			WideCharToMultiByte(CP_ACP, 0, lppe->szExeFile, -1,
+				exe_name, sizeof(exe_name), NULL, NULL);
+
+			is_blacklisted = 0;
+			for (i = 0; i < blacklist_count; i++) {
+				if (!_stricmp(exe_name, g_mirage_blacklisted_procs[i])) {
+					is_blacklisted = 1;
+					break;
+				}
+			}
+
+			set_lasterrors(&lasterror);
+
+			if (!is_blacklisted)
+				break;
+
+			/* skip the VM guest-tool entry and pull the next one from the
+			 * real snapshot (also re-applying protected-pid filtering);
+			 * ret becomes FALSE once the snapshot is exhausted */
+			ret = Old_Process32NextW(hSnapshot, lppe);
+			while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
+				ret = Old_Process32NextW(hSnapshot, lppe);
+		}
+	}
 
 	if (ret)
 		LOQ_bool("process", "ui", "ProcessName", lppe->szExeFile, "ProcessId", lppe->th32ProcessID);
@@ -84,12 +130,59 @@ HOOKDEF(BOOL, WINAPI, Process32NextW,
 HOOKDEF(BOOL, WINAPI, Process32FirstW,
 	__in HANDLE hSnapshot,
 	__out LPPROCESSENTRY32W lppe
-	) {
-	BOOL ret = Old_Process32FirstW(hSnapshot, lppe);
+	)
+{
+static const char *g_mirage_blacklisted_procs[] = {
+		"vboxservice.exe",
+		"vmtoolsd.exe",
+		"vmwaretray.exe",
+		"xenservice.exe",
+	};
+	BOOL ret;
+	lasterror_t lasterror;
+	char exe_name[MAX_PATH * 2];
+	unsigned int i;
+	unsigned int blacklist_count;
+	int is_blacklisted;
+
+	ret = Old_Process32FirstW(hSnapshot, lppe);
 
 	/* skip returning protected processes */
 	while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
 		ret = Old_Process32NextW(hSnapshot, lppe);
+
+	if (!g_config.no_stealth) {
+		blacklist_count = sizeof(g_mirage_blacklisted_procs) / sizeof(g_mirage_blacklisted_procs[0]);
+
+		while (ret && lppe != NULL) {
+			get_lasterrors(&lasterror);
+
+			exe_name[0] = '\0';
+			WideCharToMultiByte(CP_ACP, 0, lppe->szExeFile, -1,
+				exe_name, sizeof(exe_name), NULL, NULL);
+
+			is_blacklisted = 0;
+			for (i = 0; i < blacklist_count; i++) {
+				if (!_stricmp(exe_name, g_mirage_blacklisted_procs[i])) {
+					is_blacklisted = 1;
+					break;
+				}
+			}
+
+			set_lasterrors(&lasterror);
+
+			if (!is_blacklisted)
+				break;
+
+			/* the first snapshot entry is a VM guest-tool process; advance
+			 * through the real snapshot until a non-matching entry is found
+			 * (also re-applying protected-pid filtering); ret becomes FALSE
+			 * once the snapshot is exhausted */
+			ret = Old_Process32NextW(hSnapshot, lppe);
+			while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
+				ret = Old_Process32NextW(hSnapshot, lppe);
+		}
+	}
 
 	if (ret)
 		LOQ_bool("process", "ui", "ProcessName", lppe->szExeFile, "ProcessId", lppe->th32ProcessID);

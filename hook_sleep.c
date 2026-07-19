@@ -642,16 +642,25 @@ static int lastinput_called;
 
 HOOKDEF(BOOL, WINAPI, GetLastInputInfo,
 	_Out_ PLASTINPUTINFO plii
-) {
-	BOOL ret = Old_GetLastInputInfo(plii);
+)
+{
+BOOL ret;
+	lasterror_t lasterror;
+
+	ret = Old_GetLastInputInfo(plii);
 
 	LOQ_bool("system", "");
 
-	lastinput_called++;
-
 	/* fake recent user activity */
-	if (lastinput_called > 2 && plii && plii->cbSize == 8)
-		plii->dwTime = raw_gettickcount() + (DWORD)(time_skipped.QuadPart / 10000);
+	if (!g_config.no_stealth && ret && plii && plii->cbSize == 8) {
+		get_lasterrors(&lasterror);
+
+		/* forge dwTime so computed idle time (GetTickCount() - dwTime) is
+		 * ~100ms, well under the sample's idle-time threshold */
+		plii->dwTime = GetTickCount() - 100;
+
+		set_lasterrors(&lasterror);
+	}
 
 	return ret;
 }

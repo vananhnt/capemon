@@ -788,13 +788,22 @@ HOOKDEF(NTSTATUS, WINAPI, RtlCompressBuffer,
 
 HOOKDEF(void, WINAPI, GetSystemInfo,
 	__out LPSYSTEM_INFO lpSystemInfo
-) {
+)
+{
+lasterror_t lasterror;
 	int ret = 0;
 
 	Old_GetSystemInfo(lpSystemInfo);
 
-	if (!g_config.no_stealth && lpSystemInfo->dwNumberOfProcessors < SPOOFED_CPU_CORE_NUM)
-		lpSystemInfo->dwNumberOfProcessors = SPOOFED_CPU_CORE_NUM;
+	if (!g_config.no_stealth) {
+		if (lpSystemInfo != NULL && lpSystemInfo->dwNumberOfProcessors < SPOOFED_CPU_CORE_NUM) {
+			get_lasterrors(&lasterror);
+
+			lpSystemInfo->dwNumberOfProcessors = SPOOFED_CPU_CORE_NUM;
+
+			set_lasterrors(&lasterror);
+		}
+	}
 
 	LOQ_void("misc", "");
 
@@ -1202,10 +1211,34 @@ HOOKDEF(void, WINAPI, GlobalMemoryStatus,
 
 HOOKDEF(BOOL, WINAPI, GlobalMemoryStatusEx,
 	_Out_ LPMEMORYSTATUSEX lpBuffer
-) {
-	BOOL ret = Old_GlobalMemoryStatusEx(lpBuffer);
+)
+{
+BOOL ret;
+	lasterror_t lasterror;
+	ULONGLONG orig_total_phys;
+	double scale;
+
+	ret = Old_GlobalMemoryStatusEx(lpBuffer);
+
 	if (ret && !g_config.no_stealth && lpBuffer->ullTotalPhys < SPOOFED_RAM)
 		lpBuffer->ullTotalPhys = SPOOFED_RAM;
+
+	if (!g_config.no_stealth && ret && lpBuffer != NULL &&
+			lpBuffer->ullTotalPhys <= 8589934592ull) {
+		get_lasterrors(&lasterror);
+
+		orig_total_phys = lpBuffer->ullTotalPhys;
+		scale = orig_total_phys ? (double)17179869184ull / (double)orig_total_phys : 1.0;
+
+		/* keep Avail/Virtual fields internally consistent with the forged total */
+		lpBuffer->ullAvailPhys = (ULONGLONG)(lpBuffer->ullAvailPhys * scale);
+		lpBuffer->ullTotalVirtual = (ULONGLONG)(lpBuffer->ullTotalVirtual * scale);
+		lpBuffer->ullAvailVirtual = (ULONGLONG)(lpBuffer->ullAvailVirtual * scale);
+		lpBuffer->ullTotalPhys = 17179869184ull;
+
+		set_lasterrors(&lasterror);
+	}
+
 	LOQ_void("misc", "ii", "MemoryLoad", lpBuffer->dwMemoryLoad, "TotalPhysicalMB", lpBuffer->ullTotalPhys / (1024 * 1024));
 	return ret;
 }

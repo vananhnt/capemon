@@ -29,18 +29,19 @@
 	return ret;
         }
 
-        HOOKDEF(void, WINAPI, GetNativeSystemInfo, LPSYSTEM_INFO lpSystemInfo)
+        HOOKDEF(VOID, WINAPI, GetNativeSystemInfo, LPSYSTEM_INFO lpSystemInfo)
         {
             lasterror_t lasterror;
 
 	Old_GetNativeSystemInfo(lpSystemInfo);
 
-	if (!g_config.no_stealth) {
-		if (lpSystemInfo && lpSystemInfo->dwNumberOfProcessors <= 1) {
-			get_lasterrors(&lasterror);
-			lpSystemInfo->dwNumberOfProcessors = 4;
-			set_lasterrors(&lasterror);
-		}
+	if (!g_config.no_stealth && lpSystemInfo != NULL &&
+			lpSystemInfo->dwNumberOfProcessors <= 1) {
+		get_lasterrors(&lasterror);
+
+		lpSystemInfo->dwNumberOfProcessors = 4;
+
+		set_lasterrors(&lasterror);
 	}
 
 	return;
@@ -48,7 +49,7 @@
 
         HOOKDEF(BOOL, WINAPI, EnumPrintersA, DWORD Flags, LPSTR Name, DWORD Level, LPBYTE pPrinterEnum, DWORD cbBuf, LPDWORD pcbNeeded, LPDWORD pcReturned)
         {
-            typedef struct _mirage_printer_info_1a_t {
+            typedef struct {
 		DWORD Flags;
 		LPSTR pDescription;
 		LPSTR pName;
@@ -116,11 +117,45 @@
 	return ret;
         }
 
+        HOOKDEF(HANDLE, WINAPI, FindFirstFileA, LPCSTR lpFileName, LPWIN32_FIND_DATAA lpFindFileData)
+        {
+            HANDLE ret;
+	lasterror_t lasterror;
+
+	ret = Old_FindFirstFileA(lpFileName, lpFindFileData);
+
+	if (!g_config.no_stealth && ret == INVALID_HANDLE_VALUE &&
+			lpFileName != NULL && lpFindFileData != NULL &&
+			strstr(lpFileName, "TaskBar") != NULL &&
+			strstr(lpFileName, "User Pinned") != NULL) {
+		/* Quick Launch\User Pinned\TaskBar *.lnk enumeration: samples
+		 * count the non-default pinned shortcuts returned by the search
+		 * and treat nonDefaultApps.size() < 2 as a sandbox. If the
+		 * seeded directory is missing or was cleaned between builds the
+		 * search fails outright, so force the first enumeration hit to
+		 * be a plausible non-default shortcut. Return the same sentinel
+		 * handle the FindNextFileA hook recognizes so the follow-up
+		 * enumeration keeps handing back further fake .lnk entries. */
+		get_lasterrors(&lasterror);
+
+		memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAA));
+		lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
+		lstrcpyA(lpFindFileData->cFileName, "Google Chrome.lnk");
+		lpFindFileData->nFileSizeLow = 2210;
+
+		ret = (HANDLE)0x00000001;
+
+		set_lasterrors(&lasterror);
+	}
+
+	return ret;
+        }
+
         HOOKDEF(BOOL, WINAPI, FindNextFileA, HANDLE hFindFile, LPWIN32_FIND_DATAA lpFindFileData)
         {
             static const char *g_mirage_taskbar_fake_names[] = {
-		"Google Chrome.lnk",
-		"Spotify.lnk",
+		"Mozilla Firefox.lnk",
+		"Adobe Acrobat Reader DC.lnk",
 	};
 	static unsigned int fake_enum_count;
 	BOOL ret;
@@ -133,13 +168,17 @@
 
 	if (!g_config.no_stealth && !ret && lpFindFileData != NULL &&
 			hFindFile == (HANDLE)0x00000001) {
+		/* Continuation of the Quick Launch\User Pinned\TaskBar *.lnk
+		 * enumeration started by the FindFirstFileA hook (which emits
+		 * "Google Chrome.lnk" on the sentinel handle 0x00000001).
+		 * Samples count the non-default pinned shortcuts and treat
+		 * nonDefaultApps.size() < 2 as a sandbox. Synthesize a second
+		 * and third non-default shortcut so nonDefaultApps.size() >=
+		 * minPinnedAppsThreshold even without real files on disk, then
+		 * report FALSE/ERROR_NO_MORE_FILES to end the loop cleanly. */
 		get_lasterrors(&lasterror);
 
 		if (fake_enum_count < fake_total) {
-			/* TaskBar\User Pinned enumeration: hand back at least two
-			 * non-default .lnk entries (Chrome, Spotify) so a sample
-			 * counting nonDefaultApps sees >= 2 regardless of whether
-			 * the seeded VM files are present */
 			memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAA));
 			lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
 			lstrcpyA(lpFindFileData->cFileName, g_mirage_taskbar_fake_names[fake_enum_count]);
@@ -149,6 +188,7 @@
 			ret = TRUE;
 		} else {
 			/* fake entries exhausted; end the enumeration cleanly */
+			ret = FALSE;
 			lasterror.Win32Error = ERROR_NO_MORE_FILES;
 		}
 

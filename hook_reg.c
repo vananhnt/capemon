@@ -322,45 +322,17 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExA,
 	__inout	  LPTSTR lpClass,
 	__inout_opt  LPDWORD lpcClass,
 	__out_opt	PFILETIME lpftLastWriteTime
-) {
-	LONG ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved,
-		lpClass, lpcClass, lpftLastWriteTime);
+)
+{
+LONG ret;
 
-	// fake the absence of some keys
-	if (!g_config.no_stealth && ret == ERROR_SUCCESS) {
-		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + MAX_KEY_BUFLEN;
-		PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
-		wchar_t *keypath = get_full_key_pathA(hKey, NULL, keybuf, allocsize);
-		int i, j;
+	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, lpReserved,
+		lpClass, lpcchClass, lpftLastWriteTime);
 
-		wchar_t *parent_keys[] = {
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT"
-			L"HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Enum\\IDE"
-		};
+	LOQ_zero("registry", "piss", "KeyHandle", hKey, "Index", dwIndex,
+		"Name", ret == ERROR_SUCCESS && lpName != NULL ? lpName : "",
+		"Class", ret == ERROR_SUCCESS && lpClass != NULL ? lpClass : "");
 
-		char *replace_subkeys[] = {
-			"VBOX__", "DELL__",
-			"VMware_", "Dell_",
-			"VMWar_", "Dell_",
-		};
-
-		for (i = 0, j = 0; i < _countof(parent_keys); i += 1, j += 2) {
-			if (!wcsicmp(keypath, parent_keys[i]) && !stricmp(lpName, replace_subkeys[j])) {
-				strcpy_s(lpName, sizeof(lpName), replace_subkeys[j + 1]);
-				break;
-			}
-		}
-
-		// fake some values
-		if (lpName && !g_config.no_stealth)
-			perform_ascii_registry_fakery(keypath, lpName, (ULONG)strlen(lpName));
-		free(keybuf);
-	}
-
-	LOQ_zero("registry", "pisse", "Handle", hKey, "Index", dwIndex, "Name", ret ? "" : lpName,
-		"Class", ret ? "" : lpClass, "FullName", hKey, ret ? "" : lpName);
 	return ret;
 }
 
@@ -531,18 +503,82 @@ HOOKDEF(LONG, WINAPI, RegQueryValueExA,
 	__out_opt	LPDWORD lpType,
 	__out_opt	LPBYTE lpData,
 	__inout_opt  LPDWORD lpcbData
-) {
-	LONG ret;
+)
+{
+LONG ret;
+	lasterror_t lasterror;
+	static const char fake_name[] = "Bluetooth Mouse";
+	static const DWORD fake_conn_type = 0x00000001;
+	BYTE keyname_buf[1024];
+	PKEY_NAME_INFORMATION keyname;
+	ULONG keyname_len;
+	NTSTATUS status;
+	int is_bt_device_key = 0;
+	DWORD needed;
+	DWORD forged_type;
+	const BYTE *forged_data;
+
 	ENSURE_DWORD(lpType);
 	ret = Old_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType,
 		lpData, lpcbData);
+
+	// forge Name/ConnectionType values read from the forged BTHPORT device
+	// subkey so a secondary per-device metadata query stays coherent
+	if (!g_config.no_stealth && lpValueName != NULL && lpcbData != NULL) {
+		keyname = (PKEY_NAME_INFORMATION)keyname_buf;
+
+		status = NtQueryKey(hKey, KeyNameInformation, keyname,
+			sizeof(keyname_buf) - sizeof(WCHAR), &keyname_len);
+
+		if (NT_SUCCESS(status)) {
+			keyname->KeyName[keyname->KeyNameLength / sizeof(WCHAR)] = L'\0';
+			if (wcsstr(keyname->KeyName, L"BTHPORT\\Parameters\\Devices") != NULL)
+				is_bt_device_key = 1;
+		}
+
+		forged_type = 0;
+		forged_data = NULL;
+		needed = 0;
+
+		if (is_bt_device_key && !_stricmp(lpValueName, "Name")) {
+			forged_type = REG_SZ;
+			forged_data = (const BYTE *)fake_name;
+			needed = sizeof(fake_name);
+		} else if (is_bt_device_key && !_stricmp(lpValueName, "ConnectionType")) {
+			forged_type = REG_DWORD;
+			forged_data = (const BYTE *)&fake_conn_type;
+			needed = sizeof(fake_conn_type);
+		}
+
+		if (forged_data != NULL) {
+			get_lasterrors(&lasterror);
+
+			if (lpType != NULL)
+				*lpType = forged_type;
+
+			if (lpData == NULL) {
+				*lpcbData = needed;
+				ret = ERROR_SUCCESS;
+			} else if (*lpcbData < needed) {
+				*lpcbData = needed;
+				ret = ERROR_MORE_DATA;
+			} else {
+				memcpy(lpData, forged_data, needed);
+				*lpcbData = needed;
+				ret = ERROR_SUCCESS;
+			}
+
+			set_lasterrors(&lasterror);
+		}
+	}
+
 	if (ret == ERROR_SUCCESS && lpType != NULL && lpData != NULL && lpcbData != NULL) {
-		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + MAX_KEY_BUFLEN;
+		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + 1024;
 		PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
 		wchar_t *keypath = get_full_keyvalue_pathA(hKey, lpValueName, keybuf, allocsize);
 
 		// fake some values
-		if (lpData && !g_config.no_stealth)
+		if (lpData && !g_config.no_stealth && !is_bt_device_key)
 			perform_ascii_registry_fakery(keypath, lpData, *lpcbData);
 
 		LOQ_zero("registry", "psru", "Handle", hKey, "ValueName", lpValueName,
@@ -634,16 +670,33 @@ HOOKDEF(LONG, WINAPI, RegQueryInfoKeyA,
 	_Out_opt_	LPDWORD lpcMaxValueLen,
 	_Out_opt_	LPDWORD lpcbSecurityDescriptor,
 	_Out_opt_	PFILETIME lpftLastWriteTime
-) {
-	LONG ret = Old_RegQueryInfoKeyA(hKey, lpClass, lpcClass, lpReserved,
-		lpcSubKeys, lpcMaxSubKeyLen, lpcMaxClassLen, lpcValues,
-		lpcMaxValueNameLen, lpcMaxValueLen, lpcbSecurityDescriptor,
+)
+{
+lasterror_t lasterror;
+	LONG ret = Old_RegQueryInfoKeyA(hKey, lpClass, lpcchClass, lpReserved,
+		lpcSubKeys, lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues,
+		lpcbMaxValueNameLen, lpcbMaxValueLen, lpcbSecurityDescriptor,
 		lpftLastWriteTime);
-	LOQ_zero("registry", "pS6I", "KeyHandle", hKey, "Class", lpcClass ? *lpcClass : 0, lpClass,
-		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcMaxSubKeyLen,
-		"MaxClassLength", lpcMaxClassLen, "ValueCount", lpcValues,
-		"MaxValueNameLength", lpcMaxValueNameLen,
-		"MaxValueLength", lpcMaxValueLen);
+
+	// fake the presence of at least one subkey under email/mail-client paths
+	if (!g_config.no_stealth && ret == ERROR_SUCCESS &&
+			lpcSubKeys != NULL && *lpcSubKeys == 0) {
+		/* Samples enumerate email/mail-client registry paths
+		 * (Outlook profiles, Clients\Mail, Thunderbird, Windows Mail,
+		 * CapabilityAccessManager email consent store) and treat a
+		 * subkey count of zero as "no configurations found" -> sandbox.
+		 * Report at least one subkey so the check registers a
+		 * configuration and reaches the payload branch. */
+		get_lasterrors(&lasterror);
+		*lpcSubKeys = 1;
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_zero("registry", "pS6I", "KeyHandle", hKey, "Class", lpcchClass ? *lpcchClass : 0, lpClass,
+		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcbMaxSubKeyLen,
+		"MaxClassLength", lpcbMaxClassLen, "ValueCount", lpcValues,
+		"MaxValueNameLength", lpcbMaxValueNameLen,
+		"MaxValueLength", lpcbMaxValueLen);
 	return ret;
 }
 
