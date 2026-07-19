@@ -117,40 +117,6 @@
 	return ret;
         }
 
-        HOOKDEF(HANDLE, WINAPI, FindFirstFileA, LPCSTR lpFileName, LPWIN32_FIND_DATAA lpFindFileData)
-        {
-            HANDLE ret;
-	lasterror_t lasterror;
-
-	ret = Old_FindFirstFileA(lpFileName, lpFindFileData);
-
-	if (!g_config.no_stealth && ret == INVALID_HANDLE_VALUE &&
-			lpFileName != NULL && lpFindFileData != NULL &&
-			strstr(lpFileName, "TaskBar") != NULL &&
-			strstr(lpFileName, "User Pinned") != NULL) {
-		/* Quick Launch\User Pinned\TaskBar *.lnk enumeration: samples
-		 * count the non-default pinned shortcuts returned by the search
-		 * and treat nonDefaultApps.size() < 2 as a sandbox. If the
-		 * seeded directory is missing or was cleaned between builds the
-		 * search fails outright, so force the first enumeration hit to
-		 * be a plausible non-default shortcut. Return the same sentinel
-		 * handle the FindNextFileA hook recognizes so the follow-up
-		 * enumeration keeps handing back further fake .lnk entries. */
-		get_lasterrors(&lasterror);
-
-		memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAA));
-		lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
-		lstrcpyA(lpFindFileData->cFileName, "Google Chrome.lnk");
-		lpFindFileData->nFileSizeLow = 2210;
-
-		ret = (HANDLE)0x00000001;
-
-		set_lasterrors(&lasterror);
-	}
-
-	return ret;
-        }
-
         HOOKDEF(BOOL, WINAPI, FindNextFileA, HANDLE hFindFile, LPWIN32_FIND_DATAA lpFindFileData)
         {
             static const char *g_mirage_taskbar_fake_names[] = {

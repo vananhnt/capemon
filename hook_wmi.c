@@ -153,10 +153,10 @@ HOOKDEF(HRESULT, WINAPI, WMI_Next,
 {
 HRESULT ret;
 
-	ret = Old_WMI_Next(_this, lFlags, strName, pVal, pType, plFlavor);
+	ret = Old_WMI_Next(_this, lTimeout, uCount, ppObjects, puReturned);
 
-	LOQ_hresult("wmi", "inu", "Flags", lFlags, "Value", pVal,
-		"Name", strName != NULL ? *strName : NULL);
+	LOQ_hresult("wmi", "llLP", "Timeout", lTimeout, "Count", uCount,
+		"Returned", puReturned, "Objects", ppObjects);
 
 	return ret;
 }
