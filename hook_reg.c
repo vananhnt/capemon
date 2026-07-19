@@ -326,8 +326,8 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExA,
 {
 LONG ret;
 
-	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, lpReserved,
-		lpClass, lpcchClass, lpftLastWriteTime);
+	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved,
+		lpClass, lpcClass, lpftLastWriteTime);
 
 	LOQ_zero("registry", "piss", "KeyHandle", hKey, "Index", dwIndex,
 		"Name", ret == ERROR_SUCCESS && lpName != NULL ? lpName : "",
@@ -673,9 +673,9 @@ HOOKDEF(LONG, WINAPI, RegQueryInfoKeyA,
 )
 {
 lasterror_t lasterror;
-	LONG ret = Old_RegQueryInfoKeyA(hKey, lpClass, lpcchClass, lpReserved,
-		lpcSubKeys, lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues,
-		lpcbMaxValueNameLen, lpcbMaxValueLen, lpcbSecurityDescriptor,
+	LONG ret = Old_RegQueryInfoKeyA(hKey, lpClass, lpcClass, lpReserved,
+		lpcSubKeys, lpcMaxSubKeyLen, lpcMaxClassLen, lpcValues,
+		lpcMaxValueNameLen, lpcMaxValueLen, lpcbSecurityDescriptor,
 		lpftLastWriteTime);
 
 	// fake the presence of at least one subkey under email/mail-client paths
@@ -692,11 +692,11 @@ lasterror_t lasterror;
 		set_lasterrors(&lasterror);
 	}
 
-	LOQ_zero("registry", "pS6I", "KeyHandle", hKey, "Class", lpcchClass ? *lpcchClass : 0, lpClass,
-		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcbMaxSubKeyLen,
-		"MaxClassLength", lpcbMaxClassLen, "ValueCount", lpcValues,
-		"MaxValueNameLength", lpcbMaxValueNameLen,
-		"MaxValueLength", lpcbMaxValueLen);
+	LOQ_zero("registry", "pS6I", "KeyHandle", hKey, "Class", lpcClass ? *lpcClass : 0, lpClass,
+		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcMaxSubKeyLen,
+		"MaxClassLength", lpcMaxClassLen, "ValueCount", lpcValues,
+		"MaxValueNameLength", lpcMaxValueNameLen,
+		"MaxValueLength", lpcMaxValueLen);
 	return ret;
 }
 
