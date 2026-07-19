@@ -517,6 +517,7 @@ LONG ret;
 	DWORD needed;
 	DWORD forged_type;
 	const BYTE *forged_data;
+	static _NtQueryKey pNtQueryKey = NULL;
 
 	ENSURE_DWORD(lpType);
 	ret = Old_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType,
@@ -527,7 +528,15 @@ LONG ret;
 	if (!g_config.no_stealth && lpValueName != NULL && lpcbData != NULL) {
 		keyname = (PKEY_NAME_INFORMATION)keyname_buf;
 
-		status = NtQueryKey(hKey, KeyNameInformation, keyname,
+		// NtQueryKey isn't in any linked import library; resolve it from
+		// ntdll dynamically, matching how misc.c obtains the same routine.
+		if (pNtQueryKey == NULL)
+			*(FARPROC *)&pNtQueryKey = GetProcAddress(GetModuleHandle("ntdll"), "NtQueryKey");
+
+		if (pNtQueryKey == NULL)
+			goto skip_forge;
+
+		status = pNtQueryKey(hKey, KeyNameInformation, keyname,
 			sizeof(keyname_buf) - sizeof(WCHAR), &keyname_len);
 
 		if (NT_SUCCESS(status)) {
@@ -570,6 +579,9 @@ LONG ret;
 
 			set_lasterrors(&lasterror);
 		}
+
+skip_forge:
+		;
 	}
 
 	if (ret == ERROR_SUCCESS && lpType != NULL && lpData != NULL && lpcbData != NULL) {
