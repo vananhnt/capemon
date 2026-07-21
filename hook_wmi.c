@@ -49,6 +49,20 @@ void SpoofWmiData(const wchar_t* szClassName, const wchar_t* wszName, VARIANT* p
 				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
 			}
 		}
+		// Win32_BaseBoard.Manufacturer reporting "Oracle Corporation" is the
+		// evasive tell for VirtualBox-backed sandboxes; force it to a common
+		// physical-hardware vendor string.
+		else if (!_wcsicmp(szClassName, L"Win32_BaseBoard") && !_wcsicmp(wszName, L"Manufacturer") &&
+				wcsstr(pVal->bstrVal, L"Oracle Corporation")) {
+			BSTR spoofed = SysAllocString(L"Dell Inc.");
+			if (spoofed) {
+				lasterror_t lasterror;
+				get_lasterrors(&lasterror);
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = spoofed;
+				set_lasterrors(&lasterror);
+			}
+		}
 	}
 	//
 	// Spoofery logic for I4 (Signed 32-bit integer)
@@ -142,116 +156,6 @@ HRESULT ret;
 	return ret;
 }
 
-/* shared dispatch helper(s) called above — extend these, not the wrapper */
-
-void SpoofWmiData(const wchar_t* szClassName, const wchar_t* wszName, VARIANT* pVal);
-
-void SpoofWmiData(const wchar_t* szClassName, const wchar_t* wszName, VARIANT* pVal) {
-	if (g_config.no_stealth)
-		return;
-
-	if (!szClassName || !wszName || !pVal)
-		return;
-
-	//
-	// Spoofery logic for BSTR (wchar_t *)
-	//
-	if (pVal->vt == VT_BSTR && pVal->bstrVal) {
-		if (!_wcsicmp(pVal->bstrVal, L"Microsoft Basic Display Adapter")) {
-			SysFreeString(pVal->bstrVal);
-			pVal->bstrVal = SysAllocString(SPOOFED_GPU_NAME);
-		}
-		else if (!_wcsicmp(wszName, L"TotalPhysicalMemory")) {
-			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
-			if (actualMemory < SPOOFED_RAM) {
-				SysFreeString(pVal->bstrVal);
-				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
-			}
-		}
-		else if (!_wcsicmp(wszName, L"TotalVisibleMemorySize")) {
-			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
-			// actualMemory is in Kilobytes, our spoofed values are in bytes
-			if (actualMemory < (SPOOFED_RAM / 1024)) {
-				SysFreeString(pVal->bstrVal);
-				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM_IN_KB);
-			}
-		}
-		//
-		// Logic for BSTR fakery specific to an exact szClassName
-		//
-		else if (!_wcsicmp(szClassName, L"Win32_LogicalDisk") && !_wcsicmp(wszName, L"Size")) {
-			unsigned long long lSize = wcstoull(pVal->bstrVal, NULL, 10);
-			if (lSize < SPOOFED_DISK_SIZE - RECOVERY_PARTITION_SIZE) {
-				SysFreeString(pVal->bstrVal);
-				pVal->bstrVal = SysAllocString(WIDE_DISK_LOGICAL_SIZE);
-			}
-		}
-		else if (!_wcsicmp(szClassName, L"Win32_PhysicalMemory") && !_wcsicmp(wszName, L"Capacity")) {
-			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
-			if (actualMemory < SPOOFED_RAM) {
-				SysFreeString(pVal->bstrVal);
-				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
-			}
-		}
-		// Win32_BaseBoard.Manufacturer reporting "Oracle Corporation" is the
-		// evasive tell for VirtualBox-backed sandboxes; force it to a common
-		// physical-hardware vendor string.
-		else if (!_wcsicmp(szClassName, L"Win32_BaseBoard") && !_wcsicmp(wszName, L"Manufacturer") &&
-				wcsstr(pVal->bstrVal, L"Oracle Corporation")) {
-			BSTR spoofed = SysAllocString(L"Dell Inc.");
-			if (spoofed) {
-				lasterror_t lasterror;
-				get_lasterrors(&lasterror);
-				SysFreeString(pVal->bstrVal);
-				pVal->bstrVal = spoofed;
-				set_lasterrors(&lasterror);
-			}
-		}
-	}
-	//
-	// Spoofery logic for I4 (Signed 32-bit integer)
-	//
-	else if (pVal->vt == VT_I4) {
-		if (!_wcsicmp(szClassName, L"Win32_Processor") && !_wcsicmp(wszName, L"ThreadCount")) {
-			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
-				pVal->lVal = SPOOFED_CPU_CORE_NUM;
-		}
-		else if (!_wcsicmp(wszName, L"NumberOfCores")) {
-			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
-				pVal->lVal = SPOOFED_CPU_CORE_NUM;
-		}
-		else if (!_wcsicmp(wszName, L"NumberOfLogicalProcessors")) {
-			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
-				pVal->lVal = SPOOFED_CPU_CORE_NUM;
-		}
-		else if (!_wcsicmp(wszName, L"NumberOfEnabledCore")) {
-			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
-				pVal->lVal = SPOOFED_CPU_CORE_NUM;
-		}
-		else if (!_wcsicmp(wszName, L"AdapterRAM")) {
-			if (SPOOFED_GPU_RAM > 0x7FFFFFFFULL) {
-				// Mimic overflowing the I4 if you have >2GB of Spoofed GPU RAM
-				pVal->lVal = 0x7FFFFFFF;
-			}
-			else {
-				// Cast to LONG to avoid compiler warning if SPOOFED_GPU_RAM is >2GB
-				if (pVal->lVal < (LONG)SPOOFED_GPU_RAM) {
-					pVal->lVal = (LONG)SPOOFED_GPU_RAM;
-				}
-			}
-		}
-	}
-	//
-	// Spoofery logic for NULL
-	//
-	else if (pVal->vt == VT_NULL) {
-		if (!_wcsicmp(wszName, L"SMBIOSBIOSVersion")) {
-			pVal->vt = VT_BSTR;
-			pVal->bstrVal = SysAllocString(L"1.23.1");
-		}
-	}
-}
-
 HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_In_		PVOID	_this,
 	_In_		LONG	lFlags,
@@ -263,10 +167,9 @@ HOOKDEF(HRESULT, WINAPI, WMI_Next,
 {
 HRESULT ret;
 
-	ret = Old_WMI_Next(_this, lTimeout, uCount, ppObjects, puReturned);
+	ret = Old_WMI_Next(_this, lFlags, strName, pVal, pType, plFlavor);
 
-	LOQ_hresult("wmi", "llLP", "Timeout", lTimeout, "Count", uCount,
-		"Returned", puReturned, "Objects", ppObjects);
+	LOQ_hresult("system", "un", "Name", strName ? *strName : L"", "Value", pVal);
 
 	return ret;
 }
