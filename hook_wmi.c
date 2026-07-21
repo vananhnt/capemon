@@ -101,14 +101,18 @@ HOOKDEF(HRESULT, WINAPI, WMI_Get,
 	_Out_		VARIANT	*pVal,
 	_Out_opt_	CIMTYPE	*pType,
 	_Out_opt_	LONG	*plFlavor
-) {
-	HRESULT ret;
+)
+{
+HRESULT ret;
 	WCHAR szClassName[256] = L"";
+	VARIANT classVariant;
+	IWbemClassObject* pWmiObject;
+	HRESULT hr;
+
 	if (wszName && _wcsicmp(wszName, L"__CLASS") != 0) {
-		VARIANT classVariant;
 		VariantInit(&classVariant);
-		IWbemClassObject* pWmiObject = (IWbemClassObject*)_this;
-		HRESULT hr = pWmiObject->lpVtbl->Get(pWmiObject, L"__CLASS", 0, &classVariant, NULL, NULL);
+		pWmiObject = (IWbemClassObject*)_this;
+		hr = pWmiObject->lpVtbl->Get(pWmiObject, L"__CLASS", 0, &classVariant, NULL, NULL);
 		if (SUCCEEDED(hr) && classVariant.vt == VT_BSTR) {
 			wcscpy_s(szClassName, _countof(szClassName), classVariant.bstrVal);
 		}
@@ -138,6 +142,116 @@ HOOKDEF(HRESULT, WINAPI, WMI_Get,
 	return ret;
 }
 
+/* shared dispatch helper(s) called above — extend these, not the wrapper */
+
+void SpoofWmiData(const wchar_t* szClassName, const wchar_t* wszName, VARIANT* pVal);
+
+void SpoofWmiData(const wchar_t* szClassName, const wchar_t* wszName, VARIANT* pVal) {
+	if (g_config.no_stealth)
+		return;
+
+	if (!szClassName || !wszName || !pVal)
+		return;
+
+	//
+	// Spoofery logic for BSTR (wchar_t *)
+	//
+	if (pVal->vt == VT_BSTR && pVal->bstrVal) {
+		if (!_wcsicmp(pVal->bstrVal, L"Microsoft Basic Display Adapter")) {
+			SysFreeString(pVal->bstrVal);
+			pVal->bstrVal = SysAllocString(SPOOFED_GPU_NAME);
+		}
+		else if (!_wcsicmp(wszName, L"TotalPhysicalMemory")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			if (actualMemory < SPOOFED_RAM) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
+			}
+		}
+		else if (!_wcsicmp(wszName, L"TotalVisibleMemorySize")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			// actualMemory is in Kilobytes, our spoofed values are in bytes
+			if (actualMemory < (SPOOFED_RAM / 1024)) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM_IN_KB);
+			}
+		}
+		//
+		// Logic for BSTR fakery specific to an exact szClassName
+		//
+		else if (!_wcsicmp(szClassName, L"Win32_LogicalDisk") && !_wcsicmp(wszName, L"Size")) {
+			unsigned long long lSize = wcstoull(pVal->bstrVal, NULL, 10);
+			if (lSize < SPOOFED_DISK_SIZE - RECOVERY_PARTITION_SIZE) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_DISK_LOGICAL_SIZE);
+			}
+		}
+		else if (!_wcsicmp(szClassName, L"Win32_PhysicalMemory") && !_wcsicmp(wszName, L"Capacity")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			if (actualMemory < SPOOFED_RAM) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
+			}
+		}
+		// Win32_BaseBoard.Manufacturer reporting "Oracle Corporation" is the
+		// evasive tell for VirtualBox-backed sandboxes; force it to a common
+		// physical-hardware vendor string.
+		else if (!_wcsicmp(szClassName, L"Win32_BaseBoard") && !_wcsicmp(wszName, L"Manufacturer") &&
+				wcsstr(pVal->bstrVal, L"Oracle Corporation")) {
+			BSTR spoofed = SysAllocString(L"Dell Inc.");
+			if (spoofed) {
+				lasterror_t lasterror;
+				get_lasterrors(&lasterror);
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = spoofed;
+				set_lasterrors(&lasterror);
+			}
+		}
+	}
+	//
+	// Spoofery logic for I4 (Signed 32-bit integer)
+	//
+	else if (pVal->vt == VT_I4) {
+		if (!_wcsicmp(szClassName, L"Win32_Processor") && !_wcsicmp(wszName, L"ThreadCount")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfCores")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfLogicalProcessors")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfEnabledCore")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"AdapterRAM")) {
+			if (SPOOFED_GPU_RAM > 0x7FFFFFFFULL) {
+				// Mimic overflowing the I4 if you have >2GB of Spoofed GPU RAM
+				pVal->lVal = 0x7FFFFFFF;
+			}
+			else {
+				// Cast to LONG to avoid compiler warning if SPOOFED_GPU_RAM is >2GB
+				if (pVal->lVal < (LONG)SPOOFED_GPU_RAM) {
+					pVal->lVal = (LONG)SPOOFED_GPU_RAM;
+				}
+			}
+		}
+	}
+	//
+	// Spoofery logic for NULL
+	//
+	else if (pVal->vt == VT_NULL) {
+		if (!_wcsicmp(wszName, L"SMBIOSBIOSVersion")) {
+			pVal->vt = VT_BSTR;
+			pVal->bstrVal = SysAllocString(L"1.23.1");
+		}
+	}
+}
+
 HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_In_		PVOID	_this,
 	_In_		LONG	lFlags,
@@ -145,44 +259,15 @@ HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_Out_		VARIANT	*pVal,
 	_Out_opt_	CIMTYPE	*pType,
 	_Out_opt_	LONG	*plFlavor
-) {
-	HRESULT ret = Old_WMI_Next(_this, lFlags, strName, pVal, pType, plFlavor);
+)
+{
+HRESULT ret;
 
-	// Return early for some cases we don't want to log / spoof
-	if (ret != S_OK)
-		return ret;
+	ret = Old_WMI_Next(_this, lTimeout, uCount, ppObjects, puReturned);
 
-	if (!pVal)
-		return ret;
+	LOQ_hresult("wmi", "llLP", "Timeout", lTimeout, "Count", uCount,
+		"Returned", puReturned, "Objects", ppObjects);
 
-	if (pVal->vt == VT_NULL)
-		return ret;
-
-	if (!strName || !*strName)
-		return ret;
-
-	// If all is well at this point, we should do the spoofs
-	lasterror_t lasterror;
-	get_lasterrors(&lasterror);
-	VARIANT classVariant;
-	VariantInit(&classVariant);
-
-	__try {
-		IWbemClassObject* pWmiObject = (IWbemClassObject*)_this;
-		HRESULT hr = pWmiObject->lpVtbl->Get(pWmiObject, L"__CLASS", 0, &classVariant, NULL, NULL);
-		WCHAR szClassName[256] = L"";
-		if (SUCCEEDED(hr) && classVariant.vt == VT_BSTR) {
-			wcscpy_s(szClassName, _countof(szClassName), classVariant.bstrVal);
-		}
-		SpoofWmiData(szClassName, *strName, pVal);
-		LOQ_hresult("system", "unu", "Name", *strName, "Value", pVal, "Class", szClassName);
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {
-		LOQ_hresult("system", "un", "Name", *strName, "Value", pVal);
-	}
-
-	VariantClear(&classVariant);
-	set_lasterrors(&lasterror);
 	return ret;
 }
 

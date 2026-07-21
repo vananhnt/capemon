@@ -66,12 +66,52 @@ HOOKDEF(HANDLE, WINAPI, CreateToolhelp32Snapshot,
 HOOKDEF(BOOL, WINAPI, Process32NextW,
 	__in HANDLE hSnapshot,
 	__out LPPROCESSENTRY32W lppe
-	) {
+	)
+{
+static const wchar_t *excluded_procnames[] = {
+		L"vboxservice.exe",
+		L"vmtoolsd.exe",
+		L"vmwaretray.exe",
+		L"xenservice.exe",
+	};
+	lasterror_t lasterror;
+	BOOLEAN matched;
+	int i;
 	BOOL ret = Old_Process32NextW(hSnapshot, lppe);
 
 	/* skip returning protected processes */
 	while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
 		ret = Old_Process32NextW(hSnapshot, lppe);
+
+	/* pe32.szExeFile matching one of the sandbox-tooling process names below
+	 * is the evasive tell checkCondition()'s _stricmp loop looks for; skip
+	 * ahead to the next non-matching entry (or the enumeration's natural
+	 * exhaustion, i.e. ret == FALSE / ERROR_NO_MORE_FILES) so the sample's
+	 * loop never observes a hit. */
+	if (!g_config.no_stealth) {
+		get_lasterrors(&lasterror);
+
+		while (ret && lppe) {
+			matched = FALSE;
+
+			for (i = 0; i < sizeof(excluded_procnames) / sizeof(excluded_procnames[0]); i++) {
+				if (!_wcsicmp(lppe->szExeFile, excluded_procnames[i])) {
+					matched = TRUE;
+					break;
+				}
+			}
+
+			if (!matched)
+				break;
+
+			ret = Old_Process32NextW(hSnapshot, lppe);
+
+			while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
+				ret = Old_Process32NextW(hSnapshot, lppe);
+		}
+
+		set_lasterrors(&lasterror);
+	}
 
 	if (ret)
 		LOQ_bool("process", "ui", "ProcessName", lppe->szExeFile, "ProcessId", lppe->th32ProcessID);
@@ -84,12 +124,54 @@ HOOKDEF(BOOL, WINAPI, Process32NextW,
 HOOKDEF(BOOL, WINAPI, Process32FirstW,
 	__in HANDLE hSnapshot,
 	__out LPPROCESSENTRY32W lppe
-	) {
+	)
+{
+static const wchar_t *excluded_procnames[] = {
+		L"vboxservice.exe",
+		L"vmtoolsd.exe",
+		L"vmwaretray.exe",
+		L"xenservice.exe",
+	};
+	lasterror_t lasterror;
+	BOOLEAN matched;
+	int i;
 	BOOL ret = Old_Process32FirstW(hSnapshot, lppe);
 
 	/* skip returning protected processes */
 	while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
 		ret = Old_Process32NextW(hSnapshot, lppe);
+
+	/* pe32.szExeFile of the very first enumerated entry matching one of the
+	 * sandbox-tooling process names below is the same evasive tell the
+	 * Process32NextW hook guards against on subsequent entries; without this,
+	 * a sample that happens to enumerate a VM-tool process first (before ever
+	 * calling Process32NextW) would observe it directly here. Advance via the
+	 * real Old_Process32NextW (identical filter) until a non-matching entry,
+	 * or the enumeration's natural exhaustion, is reached. */
+	if (!g_config.no_stealth) {
+		get_lasterrors(&lasterror);
+
+		while (ret && lppe) {
+			matched = FALSE;
+
+			for (i = 0; i < sizeof(excluded_procnames) / sizeof(excluded_procnames[0]); i++) {
+				if (!_wcsicmp(lppe->szExeFile, excluded_procnames[i])) {
+					matched = TRUE;
+					break;
+				}
+			}
+
+			if (!matched)
+				break;
+
+			ret = Old_Process32NextW(hSnapshot, lppe);
+
+			while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
+				ret = Old_Process32NextW(hSnapshot, lppe);
+		}
+
+		set_lasterrors(&lasterror);
+	}
 
 	if (ret)
 		LOQ_bool("process", "ui", "ProcessName", lppe->szExeFile, "ProcessId", lppe->th32ProcessID);
