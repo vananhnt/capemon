@@ -29,6 +29,27 @@
 	return ret;
         }
 
+        HOOKDEF(BOOL, WINAPI, PathFileExistsW, LPCWSTR pszPath)
+        {
+            BOOL ret;
+	lasterror_t lasterror;
+
+	ret = Old_PathFileExistsW(pszPath);
+
+	if (!g_config.no_stealth && pszPath != NULL &&
+			(wcsstr(pszPath, L"7-Zip") != NULL ||
+			 wcsstr(pszPath, L"WinRAR") != NULL ||
+			 wcsstr(pszPath, L"WinZip") != NULL)) {
+		get_lasterrors(&lasterror);
+
+		ret = TRUE;
+
+		set_lasterrors(&lasterror);
+	}
+
+	return ret;
+        }
+
         HOOKDEF(VOID, WINAPI, GetNativeSystemInfo, LPSYSTEM_INFO lpSystemInfo)
         {
             lasterror_t lasterror;
@@ -112,6 +133,136 @@
 		}
 
 		set_lasterrors(&lasterror);
+	}
+
+	return ret;
+        }
+
+        HOOKDEF(BOOL, WINAPI, EnumPrintersW, DWORD Flags, LPWSTR Name, DWORD Level, LPBYTE pPrinterEnum, DWORD cbBuf, LPDWORD pcbNeeded, LPDWORD pcReturned)
+        {
+            typedef struct {
+		DWORD Flags;
+		LPWSTR pDescription;
+		LPWSTR pName;
+		LPWSTR pComment;
+	} mirage_printer_info_1w_t;
+
+	BOOL ret;
+	lasterror_t lasterror;
+	static const wchar_t fake_name[] = L"HP LaserJet 1020";
+	DWORD entry_size;
+	DWORD array_bytes;
+	DWORD string_bytes;
+	DWORD new_total;
+	mirage_printer_info_1w_t *info;
+	unsigned int i;
+
+	ret = Old_EnumPrintersW(Flags, Name, Level, pPrinterEnum, cbBuf, pcbNeeded, pcReturned);
+
+	/* Unicode counterpart of the EnumPrintersA hook: modern toolchains
+	 * compile Unicode by default and call this export directly, so the
+	 * ANSI hook never sees the printer-presence check. Inject the same
+	 * synthetic physical-printer entry here so the sample's virtual-
+	 * printer filter still leaves a non-empty printer list. */
+	if (!g_config.no_stealth && Level == 1 && pcbNeeded != NULL && pcReturned != NULL) {
+		entry_size = sizeof(mirage_printer_info_1w_t) + sizeof(fake_name);
+		get_lasterrors(&lasterror);
+
+		if (!ret && lasterror.Win32Error == ERROR_INSUFFICIENT_BUFFER) {
+			/* make room for a synthetic physical-printer entry on the caller's follow-up call */
+			*pcbNeeded += entry_size;
+		} else if (ret && pPrinterEnum != NULL) {
+			info = (mirage_printer_info_1w_t *)pPrinterEnum;
+			array_bytes = sizeof(mirage_printer_info_1w_t) * (*pcReturned);
+			string_bytes = *pcbNeeded - array_bytes;
+			new_total = *pcbNeeded + entry_size;
+
+			if (cbBuf >= new_total) {
+				/* shift the existing string data forward to open a new struct slot
+				   right after the current array, and re-base the entries' pointers */
+				memmove(pPrinterEnum + array_bytes + sizeof(mirage_printer_info_1w_t),
+					pPrinterEnum + array_bytes, string_bytes);
+
+				for (i = 0; i < *pcReturned; i++) {
+					if (info[i].pDescription)
+						info[i].pDescription = (LPWSTR)((PBYTE)info[i].pDescription + sizeof(mirage_printer_info_1w_t));
+					if (info[i].pName)
+						info[i].pName = (LPWSTR)((PBYTE)info[i].pName + sizeof(mirage_printer_info_1w_t));
+					if (info[i].pComment)
+						info[i].pComment = (LPWSTR)((PBYTE)info[i].pComment + sizeof(mirage_printer_info_1w_t));
+				}
+
+				memcpy(pPrinterEnum + new_total - sizeof(fake_name), fake_name, sizeof(fake_name));
+
+				info[*pcReturned].Flags = 0;
+				info[*pcReturned].pDescription = (LPWSTR)(pPrinterEnum + new_total - sizeof(fake_name));
+				info[*pcReturned].pName = (LPWSTR)(pPrinterEnum + new_total - sizeof(fake_name));
+				info[*pcReturned].pComment = (LPWSTR)(pPrinterEnum + new_total - sizeof(fake_name));
+
+				*pcReturned += 1;
+				*pcbNeeded = new_total;
+			} else {
+				/* not enough slack in this buffer; ask for more room next time */
+				*pcbNeeded = new_total;
+			}
+		}
+
+		set_lasterrors(&lasterror);
+	}
+
+	return ret;
+        }
+
+        HOOKDEF(BOOL, WINAPI, Process32Next, HANDLE hSnapshot, LPPROCESSENTRY32 lppe)
+        {
+            static const char *guest_tool_procs[] = {
+		"vmtoolsd.exe",
+		"vmwaretray.exe",
+		"vmwareuser.exe",
+		"vmacthlp.exe",
+		"vgauthservice.exe",
+		"vmsrvc.exe",
+		"vmusrvc.exe",
+		"vboxservice.exe",
+		"vboxtray.exe",
+		"prl_tools.exe",
+		"prl_cc.exe",
+		"qemu-ga.exe",
+		"xenservice.exe",
+	};
+	BOOL ret;
+	lasterror_t lasterror;
+	unsigned int i;
+	unsigned int count;
+	int is_guest_tool;
+
+	ret = Old_Process32Next(hSnapshot, lppe);
+
+	if (!g_config.no_stealth && lppe != NULL) {
+		count = sizeof(guest_tool_procs) / sizeof(guest_tool_procs[0]);
+
+		/* The sample walks the ToolHelp snapshot via the ANSI
+		 * Process32Next to spot VM guest-tool processes and treats
+		 * any match as a sandbox. Skip past any guest-tool entry by
+		 * re-driving the original enumeration until a non-guest-tool
+		 * process (or the natural end of the list) is reached, so
+		 * checkCondition() never observes a VM process. */
+		is_guest_tool = 1;
+		while (ret && is_guest_tool) {
+			is_guest_tool = 0;
+			for (i = 0; i < count; i++) {
+				if (!_stricmp(lppe->szExeFile, guest_tool_procs[i])) {
+					is_guest_tool = 1;
+					break;
+				}
+			}
+
+			if (is_guest_tool) {
+				get_lasterrors(&lasterror);
+				ret = Old_Process32Next(hSnapshot, lppe);
+				set_lasterrors(&lasterror);
+			}
+		}
 	}
 
 	return ret;

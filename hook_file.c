@@ -1484,14 +1484,56 @@ HOOKDEF(HANDLE, WINAPI, FindFirstFileExW,
 HOOKDEF(BOOL, WINAPI, FindNextFileW,
 	__in HANDLE hFindFile,
 	__out LPWIN32_FIND_DATAW lpFindFileData
-) {
-	BOOL ret = Old_FindNextFileW(hFindFile, lpFindFileData);
+)
+{
+static const wchar_t *g_mirage_taskbar_fake_names_w[] = {
+		L"Mozilla Firefox.lnk",
+		L"Adobe Acrobat Reader DC.lnk",
+	};
+	static unsigned int fake_enum_count_w;
+	BOOL ret;
+	lasterror_t lasterror;
+	unsigned int fake_total;
+
+	ret = Old_FindNextFileW(hFindFile, lpFindFileData);
 
 	while (!g_config.no_stealth && ret && (
 		!wcsicmp(lpFindFileData->cFileName, g_config.w_analyzer + 3) ||
 		!wcsicmp(lpFindFileData->cFileName, g_config.w_results + 3) ||
 		!wcsicmp(lpFindFileData->cFileName, g_config.w_pythonpath + 3))) {
 		ret = Old_FindNextFileW(hFindFile, lpFindFileData);
+	}
+
+	fake_total = sizeof(g_mirage_taskbar_fake_names_w) / sizeof(g_mirage_taskbar_fake_names_w[0]);
+
+	if (!g_config.no_stealth && !ret && lpFindFileData != NULL &&
+			hFindFile == (HANDLE)0x00000002) {
+		/* Unicode counterpart of the FindNextFileA hook. The pinned-apps
+		 * count is reached through SHGetFolderPathW/PathCombineW, so the
+		 * enumeration of %APPDATA%\Microsoft\Internet Explorer\Quick
+		 * Launch\User Pinned\TaskBar\*.lnk runs on the wide exports and
+		 * never touches the A thunks. Continue the enumeration started by
+		 * the paired FindFirstFileW hook (sentinel handle 0x00000002,
+		 * which emits "Google Chrome.lnk") and synthesize the extra
+		 * shortcuts so nonDefaultApps.size() >= minPinnedAppsThreshold,
+		 * then report FALSE/ERROR_NO_MORE_FILES to end the loop cleanly. */
+		get_lasterrors(&lasterror);
+
+		if (fake_enum_count_w < fake_total) {
+			memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAW));
+			lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
+			lstrcpyW(lpFindFileData->cFileName, g_mirage_taskbar_fake_names_w[fake_enum_count_w]);
+			lpFindFileData->nFileSizeLow = 2210;
+
+			fake_enum_count_w++;
+			ret = TRUE;
+		} else {
+			/* fake entries exhausted; end the enumeration cleanly */
+			ret = FALSE;
+			lasterror.Win32Error = ERROR_NO_MORE_FILES;
+		}
+
+		set_lasterrors(&lasterror);
 	}
 
 	// not logging this due to the flood of logs it would cause
