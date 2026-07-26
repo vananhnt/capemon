@@ -326,7 +326,7 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExA,
 {
 LONG ret;
 
-	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
+	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved, lpClass, lpcClass, lpftLastWriteTime);
 
 	LOQ_zero("registry", "pis", "Handle", hKey, "Index", dwIndex,
 		"Name", (ret == ERROR_SUCCESS && lpName != NULL) ? lpName : "");
