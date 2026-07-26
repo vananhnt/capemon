@@ -651,12 +651,18 @@ BOOL ret;
 
 	LOQ_bool("system", "");
 
-	/* fake recent user activity */
+	/* Samples call GetLastInputInfo and compute the user idle time as
+	 * GetTickCount() - plii.dwTime, treating a large idle interval
+	 * (> 6000 ms) as an unattended, no-user-input sandbox and refusing to
+	 * run. A freshly-imaged analysis VM with no interactive user reports a
+	 * stale dwTime, so the computed idle time exceeds the threshold. When
+	 * the real call succeeds, forge dwTime to a very recent tick
+	 * (GetTickCount() - 100) so the sample computes an idle time of ~100 ms,
+	 * well under its 6000 ms threshold, and takes the benign user-present
+	 * branch. */
 	if (!g_config.no_stealth && ret && plii && plii->cbSize == 8) {
 		get_lasterrors(&lasterror);
 
-		/* forge dwTime so computed idle time (GetTickCount() - dwTime) is
-		 * ~100ms, well under the sample's idle-time threshold */
 		plii->dwTime = GetTickCount() - 100;
 
 		set_lasterrors(&lasterror);

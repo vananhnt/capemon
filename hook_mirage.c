@@ -3,11 +3,36 @@
  * Auto-regenerated; do not edit by hand.
  */
 #include <stdio.h>
+#include <ctype.h>
 #include "hooking.h"
 #include <tlhelp32.h>
 #include <slpublic.h>
 #include "log.h"
 #include "config.h"
+
+/* Case-insensitive ASCII substring search over const inputs; returns a pointer
+ * to the first match or NULL. Local to this file so the generated hooks can
+ * match paths regardless of casing without depending on misc.c's non-const
+ * stristr(). */
+static const char *mirage_stristr_ascii(const char *haystack, const char *needle)
+{
+	int c = tolower((unsigned char)*needle);
+	if (c == '\0')
+		return haystack;
+	for (; *haystack; haystack++) {
+		if (tolower((unsigned char)*haystack) == c) {
+			size_t i = 0;
+			for (;;) {
+				if (needle[++i] == '\0')
+					return haystack;
+				if (tolower((unsigned char)haystack[i]) != tolower((unsigned char)needle[i]))
+					break;
+			}
+		}
+	}
+	return NULL;
+}
+
         HOOKDEF(BOOL, WINAPI, PathFileExistsA, LPCSTR pszPath)
         {
             BOOL ret;
@@ -15,7 +40,14 @@
 
 	ret = Old_PathFileExistsA(pszPath);
 
-	if (!g_config.no_stealth && pszPath != NULL &&
+	/* Samples probe for common compression-tool install directories under
+	 * Program Files (7-Zip, WinRAR, WinZip, including the Program Files
+	 * (x86) variants) via PathFileExistsA and treat an empty foundTools
+	 * list as a bare sandbox with no real user software installed. When the
+	 * probed path names one of those compression-tool directories, report
+	 * TRUE so foundTools becomes non-empty and checkCondition() classifies
+	 * the host as a genuine user environment. */
+	if (!g_config.no_stealth && !ret && pszPath != NULL &&
 			(strstr(pszPath, "7-Zip") != NULL ||
 			 strstr(pszPath, "WinRAR") != NULL ||
 			 strstr(pszPath, "WinZip") != NULL)) {
@@ -36,7 +68,17 @@
 
 	ret = Old_PathFileExistsW(pszPath);
 
-	if (!g_config.no_stealth && pszPath != NULL &&
+	/* Unicode counterpart of the PathFileExistsA hook: modern toolchains
+	 * compile Unicode by default, so a recompiled build of the same check
+	 * calls this wide export directly and the ANSI hook never sees it.
+	 * Samples probe for common compression-tool install directories under
+	 * Program Files (7-Zip, WinRAR, WinZip, including the Program Files
+	 * (x86) variants) via PathFileExistsW and treat an empty foundTools
+	 * list as a bare sandbox with no real user software installed. When the
+	 * probed path names one of those compression-tool directories, report
+	 * TRUE so foundTools becomes non-empty and checkCondition() classifies
+	 * the host as a genuine user environment. */
+	if (!g_config.no_stealth && !ret && pszPath != NULL &&
 			(wcsstr(pszPath, L"7-Zip") != NULL ||
 			 wcsstr(pszPath, L"WinRAR") != NULL ||
 			 wcsstr(pszPath, L"WinZip") != NULL)) {
@@ -56,6 +98,12 @@
 
 	Old_GetNativeSystemInfo(lpSystemInfo);
 
+	/* GetNativeSystemInfo is the WOW64/native fallback samples use to read
+	 * the true processor count when GetSystemInfo might be virtualized;
+	 * they treat dwNumberOfProcessors <= 1 as a single-core sandbox VM.
+	 * Overwrite the reported processor count with a realistic multi-core
+	 * value on this native-info path too, so the fallback also reports a
+	 * multi-core count like an ordinary physical desktop. */
 	if (!g_config.no_stealth && lpSystemInfo != NULL &&
 			lpSystemInfo->dwNumberOfProcessors <= 1) {
 		get_lasterrors(&lasterror);
@@ -84,185 +132,66 @@
 	DWORD array_bytes;
 	DWORD string_bytes;
 	DWORD new_total;
+	DWORD name_off;
 	mirage_printer_info_1a_t *info;
-	unsigned int i;
 
 	ret = Old_EnumPrintersA(Flags, Name, Level, pPrinterEnum, cbBuf, pcbNeeded, pcReturned);
 
+	/* Samples call EnumPrintersA at Level 1, walk the returned
+	 * PRINTER_INFO_1A array, and drop the known virtual printers
+	 * (Microsoft Print to PDF, Microsoft XPS Document Writer, Fax,
+	 * OneNote for Windows 10, OneNote (Desktop)) by pName; if the surviving
+	 * physical-printer list is empty they treat the host as a bare analysis
+	 * VM with no real print hardware and checkCondition() flags it.
+	 * EnumPrinters is a two-pass API: a first call with an undersized buffer
+	 * fails with ERROR_INSUFFICIENT_BUFFER and reports the required size in
+	 * *pcbNeeded, then the caller retries with a large enough buffer. Grow
+	 * *pcbNeeded on the sizing pass, and on the successful data pass append
+	 * one synthetic PRINTER_INFO_1A whose pName is "HP LaserJet 1020" and
+	 * bump *pcReturned; that name survives the virtual-printer filter so
+	 * physicalPrinters becomes non-empty and checkCondition() returns true. */
 	if (!g_config.no_stealth && Level == 1 && pcbNeeded != NULL && pcReturned != NULL) {
-		entry_size = sizeof(mirage_printer_info_1a_t) + sizeof(fake_name);
 		get_lasterrors(&lasterror);
 
+		entry_size = (DWORD)(sizeof(mirage_printer_info_1a_t) + sizeof(fake_name));
+
 		if (!ret && lasterror.Win32Error == ERROR_INSUFFICIENT_BUFFER) {
-			/* make room for a synthetic physical-printer entry on the caller's follow-up call */
+			/* sizing pass: reserve room for the extra synthetic entry so
+			   the caller's follow-up buffer is large enough to hold it */
 			*pcbNeeded += entry_size;
 		} else if (ret && pPrinterEnum != NULL) {
-			info = (mirage_printer_info_1a_t *)pPrinterEnum;
-			array_bytes = sizeof(mirage_printer_info_1a_t) * (*pcReturned);
+			array_bytes = (DWORD)(sizeof(mirage_printer_info_1a_t) * (*pcReturned));
 			string_bytes = *pcbNeeded - array_bytes;
 			new_total = *pcbNeeded + entry_size;
 
 			if (cbBuf >= new_total) {
-				/* shift the existing string data forward to open a new struct slot
-				   right after the current array, and re-base the entries' pointers */
-				memmove(pPrinterEnum + array_bytes + sizeof(mirage_printer_info_1a_t),
-					pPrinterEnum + array_bytes, string_bytes);
+				info = (mirage_printer_info_1a_t *)pPrinterEnum;
 
-				for (i = 0; i < *pcReturned; i++) {
-					if (info[i].pDescription)
-						info[i].pDescription += sizeof(mirage_printer_info_1a_t);
-					if (info[i].pName)
-						info[i].pName += sizeof(mirage_printer_info_1a_t);
-					if (info[i].pComment)
-						info[i].pComment += sizeof(mirage_printer_info_1a_t);
-				}
-
-				memcpy(pPrinterEnum + new_total - sizeof(fake_name), fake_name, sizeof(fake_name));
+				/* winspool packs the struct array at the front of the
+				   buffer and the strings at the tail. Place the new pName
+				   string just below the existing string block and the new
+				   struct slot right after the current array; both land in
+				   the previously-unused slack between them, so no existing
+				   struct or string is disturbed and the original entries'
+				   pointers stay valid. */
+				name_off = cbBuf - string_bytes - (DWORD)sizeof(fake_name);
+				memcpy(pPrinterEnum + name_off, fake_name, sizeof(fake_name));
 
 				info[*pcReturned].Flags = 0;
-				info[*pcReturned].pDescription = (LPSTR)(pPrinterEnum + new_total - sizeof(fake_name));
-				info[*pcReturned].pName = (LPSTR)(pPrinterEnum + new_total - sizeof(fake_name));
-				info[*pcReturned].pComment = (LPSTR)(pPrinterEnum + new_total - sizeof(fake_name));
+				info[*pcReturned].pDescription = (LPSTR)(pPrinterEnum + name_off);
+				info[*pcReturned].pName = (LPSTR)(pPrinterEnum + name_off);
+				info[*pcReturned].pComment = (LPSTR)(pPrinterEnum + name_off);
 
 				*pcReturned += 1;
 				*pcbNeeded = new_total;
 			} else {
-				/* not enough slack in this buffer; ask for more room next time */
+				/* buffer lacks slack for the extra entry; report the larger
+				   size so the caller retries with a big enough buffer */
 				*pcbNeeded = new_total;
 			}
 		}
 
 		set_lasterrors(&lasterror);
-	}
-
-	return ret;
-        }
-
-        HOOKDEF(BOOL, WINAPI, EnumPrintersW, DWORD Flags, LPWSTR Name, DWORD Level, LPBYTE pPrinterEnum, DWORD cbBuf, LPDWORD pcbNeeded, LPDWORD pcReturned)
-        {
-            typedef struct {
-		DWORD Flags;
-		LPWSTR pDescription;
-		LPWSTR pName;
-		LPWSTR pComment;
-	} mirage_printer_info_1w_t;
-
-	BOOL ret;
-	lasterror_t lasterror;
-	static const wchar_t fake_name[] = L"HP LaserJet 1020";
-	DWORD entry_size;
-	DWORD array_bytes;
-	DWORD string_bytes;
-	DWORD new_total;
-	mirage_printer_info_1w_t *info;
-	unsigned int i;
-
-	ret = Old_EnumPrintersW(Flags, Name, Level, pPrinterEnum, cbBuf, pcbNeeded, pcReturned);
-
-	/* Unicode counterpart of the EnumPrintersA hook: modern toolchains
-	 * compile Unicode by default and call this export directly, so the
-	 * ANSI hook never sees the printer-presence check. Inject the same
-	 * synthetic physical-printer entry here so the sample's virtual-
-	 * printer filter still leaves a non-empty printer list. */
-	if (!g_config.no_stealth && Level == 1 && pcbNeeded != NULL && pcReturned != NULL) {
-		entry_size = sizeof(mirage_printer_info_1w_t) + sizeof(fake_name);
-		get_lasterrors(&lasterror);
-
-		if (!ret && lasterror.Win32Error == ERROR_INSUFFICIENT_BUFFER) {
-			/* make room for a synthetic physical-printer entry on the caller's follow-up call */
-			*pcbNeeded += entry_size;
-		} else if (ret && pPrinterEnum != NULL) {
-			info = (mirage_printer_info_1w_t *)pPrinterEnum;
-			array_bytes = sizeof(mirage_printer_info_1w_t) * (*pcReturned);
-			string_bytes = *pcbNeeded - array_bytes;
-			new_total = *pcbNeeded + entry_size;
-
-			if (cbBuf >= new_total) {
-				/* shift the existing string data forward to open a new struct slot
-				   right after the current array, and re-base the entries' pointers */
-				memmove(pPrinterEnum + array_bytes + sizeof(mirage_printer_info_1w_t),
-					pPrinterEnum + array_bytes, string_bytes);
-
-				for (i = 0; i < *pcReturned; i++) {
-					if (info[i].pDescription)
-						info[i].pDescription = (LPWSTR)((PBYTE)info[i].pDescription + sizeof(mirage_printer_info_1w_t));
-					if (info[i].pName)
-						info[i].pName = (LPWSTR)((PBYTE)info[i].pName + sizeof(mirage_printer_info_1w_t));
-					if (info[i].pComment)
-						info[i].pComment = (LPWSTR)((PBYTE)info[i].pComment + sizeof(mirage_printer_info_1w_t));
-				}
-
-				memcpy(pPrinterEnum + new_total - sizeof(fake_name), fake_name, sizeof(fake_name));
-
-				info[*pcReturned].Flags = 0;
-				info[*pcReturned].pDescription = (LPWSTR)(pPrinterEnum + new_total - sizeof(fake_name));
-				info[*pcReturned].pName = (LPWSTR)(pPrinterEnum + new_total - sizeof(fake_name));
-				info[*pcReturned].pComment = (LPWSTR)(pPrinterEnum + new_total - sizeof(fake_name));
-
-				*pcReturned += 1;
-				*pcbNeeded = new_total;
-			} else {
-				/* not enough slack in this buffer; ask for more room next time */
-				*pcbNeeded = new_total;
-			}
-		}
-
-		set_lasterrors(&lasterror);
-	}
-
-	return ret;
-        }
-
-        HOOKDEF(BOOL, WINAPI, Process32Next, HANDLE hSnapshot, LPPROCESSENTRY32 lppe)
-        {
-            static const char *guest_tool_procs[] = {
-		"vmtoolsd.exe",
-		"vmwaretray.exe",
-		"vmwareuser.exe",
-		"vmacthlp.exe",
-		"vgauthservice.exe",
-		"vmsrvc.exe",
-		"vmusrvc.exe",
-		"vboxservice.exe",
-		"vboxtray.exe",
-		"prl_tools.exe",
-		"prl_cc.exe",
-		"qemu-ga.exe",
-		"xenservice.exe",
-	};
-	BOOL ret;
-	lasterror_t lasterror;
-	unsigned int i;
-	unsigned int count;
-	int is_guest_tool;
-
-	ret = Old_Process32Next(hSnapshot, lppe);
-
-	if (!g_config.no_stealth && lppe != NULL) {
-		count = sizeof(guest_tool_procs) / sizeof(guest_tool_procs[0]);
-
-		/* The sample walks the ToolHelp snapshot via the ANSI
-		 * Process32Next to spot VM guest-tool processes and treats
-		 * any match as a sandbox. Skip past any guest-tool entry by
-		 * re-driving the original enumeration until a non-guest-tool
-		 * process (or the natural end of the list) is reached, so
-		 * checkCondition() never observes a VM process. */
-		is_guest_tool = 1;
-		while (ret && is_guest_tool) {
-			is_guest_tool = 0;
-			for (i = 0; i < count; i++) {
-				if (!_stricmp(lppe->szExeFile, guest_tool_procs[i])) {
-					is_guest_tool = 1;
-					break;
-				}
-			}
-
-			if (is_guest_tool) {
-				get_lasterrors(&lasterror);
-				ret = Old_Process32Next(hSnapshot, lppe);
-				set_lasterrors(&lasterror);
-			}
-		}
 	}
 
 	return ret;
@@ -271,8 +200,8 @@
         HOOKDEF(BOOL, WINAPI, FindNextFileA, HANDLE hFindFile, LPWIN32_FIND_DATAA lpFindFileData)
         {
             static const char *g_mirage_taskbar_fake_names[] = {
-		"Mozilla Firefox.lnk",
-		"Adobe Acrobat Reader DC.lnk",
+		"Google Chrome.lnk",
+		"Spotify.lnk",
 	};
 	static unsigned int fake_enum_count;
 	BOOL ret;
@@ -283,16 +212,20 @@
 
 	fake_total = sizeof(g_mirage_taskbar_fake_names) / sizeof(g_mirage_taskbar_fake_names[0]);
 
+	/* Samples enumerate *.lnk entries under
+	 * %APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar
+	 * via FindFirstFileA/FindNextFileA, filter out the default pinned
+	 * shortcuts, and treat nonDefaultApps.size() < 2 as a bare sandbox with
+	 * no real user activity. The companion FindFirstFileA hook recognises
+	 * that TaskBar path and hands back a sentinel search handle
+	 * (0x00000001) so this continuation can be routed here. When the real
+	 * enumeration on that sentinel handle runs dry, synthesize at least two
+	 * non-default pinned shortcuts ("Google Chrome.lnk", "Spotify.lnk")
+	 * before finally returning FALSE/ERROR_NO_MORE_FILES, so
+	 * nonDefaultApps.size() >= 2 even without real files on disk and
+	 * checkCondition() classifies the host as a genuine user environment. */
 	if (!g_config.no_stealth && !ret && lpFindFileData != NULL &&
 			hFindFile == (HANDLE)0x00000001) {
-		/* Continuation of the Quick Launch\User Pinned\TaskBar *.lnk
-		 * enumeration started by the FindFirstFileA hook (which emits
-		 * "Google Chrome.lnk" on the sentinel handle 0x00000001).
-		 * Samples count the non-default pinned shortcuts and treat
-		 * nonDefaultApps.size() < 2 as a sandbox. Synthesize a second
-		 * and third non-default shortcut so nonDefaultApps.size() >=
-		 * minPinnedAppsThreshold even without real files on disk, then
-		 * report FALSE/ERROR_NO_MORE_FILES to end the loop cleanly. */
 		get_lasterrors(&lasterror);
 
 		if (fake_enum_count < fake_total) {
@@ -304,10 +237,51 @@
 			fake_enum_count++;
 			ret = TRUE;
 		} else {
-			/* fake entries exhausted; end the enumeration cleanly */
+			/* both synthetic pinned shortcuts emitted; end the enumeration cleanly */
 			ret = FALSE;
 			lasterror.Win32Error = ERROR_NO_MORE_FILES;
 		}
+
+		set_lasterrors(&lasterror);
+	}
+
+	return ret;
+        }
+
+        HOOKDEF(HANDLE, WINAPI, FindFirstFileA, LPCSTR lpFileName, LPWIN32_FIND_DATAA lpFindFileData)
+        {
+            HANDLE ret;
+	lasterror_t lasterror;
+
+	ret = Old_FindFirstFileA(lpFileName, lpFindFileData);
+
+	/* Samples open the *.lnk search in
+	 * %APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar
+	 * via FindFirstFileA, then walk the results with FindNextFileA, filter
+	 * out the default pinned shortcuts, and treat nonDefaultApps.size() < 2
+	 * as a bare sandbox with no real user activity. On a freshly-imaged
+	 * analysis VM that TaskBar folder is often empty, so FindFirstFileA
+	 * fails outright (INVALID_HANDLE_VALUE / ERROR_FILE_NOT_FOUND) and the
+	 * caller's do/while enumeration loop never begins. When the search path
+	 * is that TaskBar *.lnk pattern and the real folder is empty, hand back
+	 * a sentinel search handle (0x00000001) plus one synthetic non-default
+	 * pinned shortcut ("Google Chrome.lnk") so the do/while loop starts;
+	 * the companion FindNextFileA hook recognises that same sentinel handle
+	 * and supplies the remaining synthetic entries so nonDefaultApps.size()
+	 * reaches >= 2 and checkCondition() classifies the host as a genuine
+	 * user environment. */
+	if (!g_config.no_stealth && ret == INVALID_HANDLE_VALUE &&
+			lpFileName != NULL && lpFindFileData != NULL &&
+			mirage_stristr_ascii(lpFileName, "User Pinned\\TaskBar") &&
+			mirage_stristr_ascii(lpFileName, ".lnk")) {
+		get_lasterrors(&lasterror);
+
+		memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAA));
+		lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
+		lstrcpyA(lpFindFileData->cFileName, "Google Chrome.lnk");
+		lpFindFileData->nFileSizeLow = 2210;
+
+		ret = (HANDLE)0x00000001;
 
 		set_lasterrors(&lasterror);
 	}
@@ -322,10 +296,18 @@
 
 	ret = Old_SLIsGenuineLocal(pAppId, pGenuineState, pvReserved);
 
+	/* Samples call SLIsGenuineLocal for the Windows AppId
+	 * {55c92734-d682-4d71-983e-d6ec3f16059f} and read *pGenuineState; any
+	 * result other than SL_GEN_STATE_IS_GENUINE (0) makes isGenuine evaluate
+	 * false, so they conclude the machine is not properly activated — a shape
+	 * typical of a throwaway analysis VM — and refuse to run the payload.
+	 * Force the licensing verdict to look like an activated retail machine:
+	 * write SL_GEN_STATE_IS_GENUINE into *pGenuineState and return S_OK so
+	 * isGenuine reads true and the sample runs its normal behaviour. */
 	if (!g_config.no_stealth) {
 		get_lasterrors(&lasterror);
 
-		if (pGenuineState)
+		if (pGenuineState != NULL)
 			*pGenuineState = SL_GEN_STATE_IS_GENUINE;
 		ret = S_OK;
 

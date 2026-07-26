@@ -326,12 +326,10 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExA,
 {
 LONG ret;
 
-	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved,
-		lpClass, lpcClass, lpftLastWriteTime);
+	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
 
-	LOQ_zero("registry", "piss", "KeyHandle", hKey, "Index", dwIndex,
-		"Name", ret == ERROR_SUCCESS && lpName != NULL ? lpName : "",
-		"Class", ret == ERROR_SUCCESS && lpClass != NULL ? lpClass : "");
+	LOQ_zero("registry", "pis", "Handle", hKey, "Index", dwIndex,
+		"Name", (ret == ERROR_SUCCESS && lpName != NULL) ? lpName : "");
 
 	return ret;
 }
@@ -506,107 +504,18 @@ HOOKDEF(LONG, WINAPI, RegQueryValueExA,
 )
 {
 LONG ret;
-	lasterror_t lasterror;
-	static const char fake_name[] = "Bluetooth Mouse";
-	static const DWORD fake_conn_type = 0x00000001;
-	BYTE keyname_buf[1024];
-	PKEY_NAME_INFORMATION keyname;
-	ULONG keyname_len;
-	NTSTATUS status;
-	int is_bt_device_key = 0;
-	DWORD needed;
-	DWORD forged_type;
-	const BYTE *forged_data;
-	static _NtQueryKey pNtQueryKey = NULL;
+	DWORD type;
+	DWORD datalen;
 
-	ENSURE_DWORD(lpType);
-	ret = Old_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType,
-		lpData, lpcbData);
+	ret = Old_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
 
-	// forge Name/ConnectionType values read from the forged BTHPORT device
-	// subkey so a secondary per-device metadata query stays coherent
-	if (!g_config.no_stealth && lpValueName != NULL && lpcbData != NULL) {
-		keyname = (PKEY_NAME_INFORMATION)keyname_buf;
+	type = (lpType != NULL) ? *lpType : 0;
+	datalen = (lpcbData != NULL) ? *lpcbData : 0;
 
-		// NtQueryKey isn't in any linked import library; resolve it from
-		// ntdll dynamically, matching how misc.c obtains the same routine.
-		if (pNtQueryKey == NULL)
-			*(FARPROC *)&pNtQueryKey = GetProcAddress(GetModuleHandle("ntdll"), "NtQueryKey");
+	LOQ_zero("registry", "psiib", "Handle", hKey, "ValueName", lpValueName,
+		"Type", type, "DataLength", datalen,
+		"Data", (ret == ERROR_SUCCESS && lpData != NULL) ? datalen : 0, lpData);
 
-		if (pNtQueryKey == NULL)
-			goto skip_forge;
-
-		status = pNtQueryKey(hKey, KeyNameInformation, keyname,
-			sizeof(keyname_buf) - sizeof(WCHAR), &keyname_len);
-
-		if (NT_SUCCESS(status)) {
-			keyname->KeyName[keyname->KeyNameLength / sizeof(WCHAR)] = L'\0';
-			if (wcsstr(keyname->KeyName, L"BTHPORT\\Parameters\\Devices") != NULL)
-				is_bt_device_key = 1;
-		}
-
-		forged_type = 0;
-		forged_data = NULL;
-		needed = 0;
-
-		if (is_bt_device_key && !_stricmp(lpValueName, "Name")) {
-			forged_type = REG_SZ;
-			forged_data = (const BYTE *)fake_name;
-			needed = sizeof(fake_name);
-		} else if (is_bt_device_key && !_stricmp(lpValueName, "ConnectionType")) {
-			forged_type = REG_DWORD;
-			forged_data = (const BYTE *)&fake_conn_type;
-			needed = sizeof(fake_conn_type);
-		}
-
-		if (forged_data != NULL) {
-			get_lasterrors(&lasterror);
-
-			if (lpType != NULL)
-				*lpType = forged_type;
-
-			if (lpData == NULL) {
-				*lpcbData = needed;
-				ret = ERROR_SUCCESS;
-			} else if (*lpcbData < needed) {
-				*lpcbData = needed;
-				ret = ERROR_MORE_DATA;
-			} else {
-				memcpy(lpData, forged_data, needed);
-				*lpcbData = needed;
-				ret = ERROR_SUCCESS;
-			}
-
-			set_lasterrors(&lasterror);
-		}
-
-skip_forge:
-		;
-	}
-
-	if (ret == ERROR_SUCCESS && lpType != NULL && lpData != NULL && lpcbData != NULL) {
-		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + 1024;
-		PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
-		wchar_t *keypath = get_full_keyvalue_pathA(hKey, lpValueName, keybuf, allocsize);
-
-		// fake some values
-		if (lpData && !g_config.no_stealth && !is_bt_device_key)
-			perform_ascii_registry_fakery(keypath, lpData, *lpcbData);
-
-		LOQ_zero("registry", "psru", "Handle", hKey, "ValueName", lpValueName,
-			"Data", *lpType, *lpcbData, lpData,
-			"FullName", keypath);
-		free(keybuf);
-	}
-	else if (ret == ERROR_MORE_DATA) {
-		LOQ_zero("registry", "psPIv", "Handle", hKey, "ValueName", lpValueName,
-			"Type", lpType, "DataLength", lpcbData,
-			"FullName", hKey, lpValueName);
-	}
-	else {
-		LOQ_zero("registry", "psv", "Handle", hKey, "ValueName", lpValueName,
-			"FullName", hKey, lpValueName);
-	}
 	return ret;
 }
 

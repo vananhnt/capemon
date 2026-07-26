@@ -795,6 +795,10 @@ lasterror_t lasterror;
 
 	Old_GetSystemInfo(lpSystemInfo);
 
+	/* Samples call GetSystemInfo and treat dwNumberOfProcessors <= 1 as a
+	 * single-core sandbox VM. Overwrite the reported processor count with a
+	 * realistic multi-core value so any processorCount check reads like an
+	 * ordinary physical desktop. */
 	if (!g_config.no_stealth) {
 		if (lpSystemInfo != NULL && lpSystemInfo->dwNumberOfProcessors < SPOOFED_CPU_CORE_NUM) {
 			get_lasterrors(&lasterror);

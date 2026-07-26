@@ -68,15 +68,23 @@ HOOKDEF(BOOL, WINAPI, Process32NextW,
 	__out LPPROCESSENTRY32W lppe
 	)
 {
-static const char *g_mirage_blacklisted_procs[] = {
-		"vboxservice.exe",
-		"vmtoolsd.exe",
-		"vmwaretray.exe",
-		"xenservice.exe",
+static const wchar_t *g_mirage_blacklisted_procs[] = {
+		L"vmtoolsd.exe",
+		L"vmwaretray.exe",
+		L"vmwareuser.exe",
+		L"vmacthlp.exe",
+		L"vgauthservice.exe",
+		L"vmsrvc.exe",
+		L"vmusrvc.exe",
+		L"vboxservice.exe",
+		L"vboxtray.exe",
+		L"prl_tools.exe",
+		L"prl_cc.exe",
+		L"qemu-ga.exe",
+		L"xenservice.exe",
 	};
 	BOOL ret;
 	lasterror_t lasterror;
-	char exe_name[MAX_PATH * 2];
 	unsigned int i;
 	unsigned int blacklist_count;
 	int is_blacklisted;
@@ -93,13 +101,9 @@ static const char *g_mirage_blacklisted_procs[] = {
 		while (ret && lppe != NULL) {
 			get_lasterrors(&lasterror);
 
-			exe_name[0] = '\0';
-			WideCharToMultiByte(CP_ACP, 0, lppe->szExeFile, -1,
-				exe_name, sizeof(exe_name), NULL, NULL);
-
 			is_blacklisted = 0;
 			for (i = 0; i < blacklist_count; i++) {
-				if (!_stricmp(exe_name, g_mirage_blacklisted_procs[i])) {
+				if (!_wcsicmp(lppe->szExeFile, g_mirage_blacklisted_procs[i])) {
 					is_blacklisted = 1;
 					break;
 				}
@@ -132,18 +136,26 @@ HOOKDEF(BOOL, WINAPI, Process32FirstW,
 	__out LPPROCESSENTRY32W lppe
 	)
 {
-static const char *g_mirage_blacklisted_procs[] = {
-		"vboxservice.exe",
-		"vmtoolsd.exe",
-		"vmwaretray.exe",
-		"xenservice.exe",
+static const wchar_t *guest_tool_procs[] = {
+		L"vmtoolsd.exe",
+		L"vmwaretray.exe",
+		L"vmwareuser.exe",
+		L"vmacthlp.exe",
+		L"vgauthservice.exe",
+		L"vmsrvc.exe",
+		L"vmusrvc.exe",
+		L"vboxservice.exe",
+		L"vboxtray.exe",
+		L"prl_tools.exe",
+		L"prl_cc.exe",
+		L"qemu-ga.exe",
+		L"xenservice.exe",
 	};
 	BOOL ret;
 	lasterror_t lasterror;
-	char exe_name[MAX_PATH * 2];
 	unsigned int i;
-	unsigned int blacklist_count;
-	int is_blacklisted;
+	unsigned int count;
+	int is_guest_tool;
 
 	ret = Old_Process32FirstW(hSnapshot, lppe);
 
@@ -151,36 +163,40 @@ static const char *g_mirage_blacklisted_procs[] = {
 	while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
 		ret = Old_Process32NextW(hSnapshot, lppe);
 
-	if (!g_config.no_stealth) {
-		blacklist_count = sizeof(g_mirage_blacklisted_procs) / sizeof(g_mirage_blacklisted_procs[0]);
+	/* Companion to the Process32NextW hook: samples call Process32FirstW to
+	 * read the very first entry of the ToolHelp snapshot and would spot a VM
+	 * guest-tool process (vboxservice.exe, vmtoolsd.exe, vmwaretray.exe,
+	 * xenservice.exe, ...) by szExeFile if it happened to be enumerated first,
+	 * treating any match as a sandbox. Apply the same case-insensitive name
+	 * filter before returning: if the first real entry is a guest-tool name,
+	 * skip forward with the original Next enumeration until a non-guest-tool
+	 * process (or the natural end of the list) is reached, so the sample's
+	 * enumeration never observes a VM guest-tool process as the first entry. */
+	if (!g_config.no_stealth && lppe != NULL) {
+		count = sizeof(guest_tool_procs) / sizeof(guest_tool_procs[0]);
 
-		while (ret && lppe != NULL) {
+		is_guest_tool = 1;
+		while (ret && is_guest_tool) {
 			get_lasterrors(&lasterror);
 
-			exe_name[0] = '\0';
-			WideCharToMultiByte(CP_ACP, 0, lppe->szExeFile, -1,
-				exe_name, sizeof(exe_name), NULL, NULL);
-
-			is_blacklisted = 0;
-			for (i = 0; i < blacklist_count; i++) {
-				if (!_stricmp(exe_name, g_mirage_blacklisted_procs[i])) {
-					is_blacklisted = 1;
+			is_guest_tool = 0;
+			for (i = 0; i < count; i++) {
+				if (!_wcsicmp(lppe->szExeFile, guest_tool_procs[i])) {
+					is_guest_tool = 1;
 					break;
 				}
 			}
 
-			set_lasterrors(&lasterror);
-
-			if (!is_blacklisted)
-				break;
-
-			/* the first snapshot entry is a VM guest-tool process; advance
-			 * through the real snapshot until a non-matching entry is found
-			 * (also re-applying protected-pid filtering); ret becomes FALSE
-			 * once the snapshot is exhausted */
-			ret = Old_Process32NextW(hSnapshot, lppe);
-			while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
+			if (is_guest_tool) {
+				/* advance past the guest-tool entry, re-applying the
+				 * protected-pid filter; ret becomes FALSE once the snapshot
+				 * is exhausted */
 				ret = Old_Process32NextW(hSnapshot, lppe);
+				while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
+					ret = Old_Process32NextW(hSnapshot, lppe);
+			}
+
+			set_lasterrors(&lasterror);
 		}
 	}
 

@@ -152,11 +152,14 @@ HOOKDEF(HRESULT, WINAPI, WMI_Next,
 )
 {
 HRESULT ret;
+	ULONG returned;
 
-	ret = Old_WMI_Next(_this, lFlags, strName, pVal, pType, plFlavor);
+	ret = Old_WMI_Next(_this, lTimeout, uCount, ppObjects, puReturned);
 
-	LOQ_hresult("system", "pipp", "this", _this, "Flags", lFlags,
-		"Name", strName, "Value", pVal);
+	returned = (puReturned != NULL) ? *puReturned : 0;
+
+	LOQ_hresult("misc", "pliil", "This", _this, "Timeout", lTimeout,
+		"Count", uCount, "Returned", returned, "Objects", ppObjects);
 
 	return ret;
 }
@@ -174,6 +177,8 @@ static PVOID g_mirage_cim_memory_enum_tags[16];
 	static unsigned int g_mirage_cim_memory_tag_next;
 	static PVOID g_mirage_physmem_enum_tags[16];
 	static unsigned int g_mirage_physmem_tag_next;
+	static PVOID g_mirage_baseboard_enum_tags[16];
+	static unsigned int g_mirage_baseboard_tag_next;
 	HRESULT ret = 0;
 	lasterror_t lasterror;
 	int forced;
@@ -209,6 +214,25 @@ static PVOID g_mirage_cim_memory_enum_tags[16];
 			(sizeof(g_mirage_physmem_enum_tags) / sizeof(g_mirage_physmem_enum_tags[0]))] =
 			forced ? (PVOID)*ppEnum : NULL;
 		g_mirage_physmem_tag_next++;
+
+		set_lasterrors(&lasterror);
+	}
+
+	if (!g_config.no_stealth && SUCCEEDED(ret) && ppEnum != NULL && *ppEnum != NULL &&
+			strQuery != NULL && wcsstr(strQuery, L"Win32_BaseBoard") != NULL) {
+		get_lasterrors(&lasterror);
+
+		/* A WQL "SELECT * FROM Win32_BaseBoard" enumerates the motherboard
+		 * instance objects, whose Manufacturer/Product properties read as
+		 * "Oracle Corporation"/"VirtualBox" under VirtualBox and betray the
+		 * VM. Record this enumerator in the SpoofWmiData dispatch tag table
+		 * so the paired WMI_Get/SpoofWmiData path forges the OEM board
+		 * identity (Manufacturer "Dell Inc.", Product "0KP0FT") on every
+		 * instance object the enumerator's Next() hands back, before the
+		 * sample ever calls Get() on it. */
+		g_mirage_baseboard_enum_tags[g_mirage_baseboard_tag_next %
+			(sizeof(g_mirage_baseboard_enum_tags) / sizeof(g_mirage_baseboard_enum_tags[0]))] = (PVOID)*ppEnum;
+		g_mirage_baseboard_tag_next++;
 
 		set_lasterrors(&lasterror);
 	}
