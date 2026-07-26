@@ -10,26 +10,39 @@
 #include "log.h"
 #include "config.h"
 
-/* Case-insensitive ASCII substring search over const inputs; returns a pointer
- * to the first match or NULL. Local to this file so the generated hooks can
- * match paths regardless of casing without depending on misc.c's non-const
- * stristr(). */
+/* Case-insensitive ASCII substring search. Returns a pointer to the first
+ * occurrence of needle within haystack (ignoring case), or NULL if not found.
+ * Defined locally so it can accept const inputs (LPCSTR) without the cast the
+ * non-const misc.c stristr() would require under MSVC. */
 static const char *mirage_stristr_ascii(const char *haystack, const char *needle)
 {
-	int c = tolower((unsigned char)*needle);
-	if (c == '\0')
+	const char *h;
+	const char *n;
+	int c;
+
+	if (haystack == NULL || needle == NULL)
+		return NULL;
+
+	if (*needle == '\0')
 		return haystack;
-	for (; *haystack; haystack++) {
-		if (tolower((unsigned char)*haystack) == c) {
-			size_t i = 0;
-			for (;;) {
-				if (needle[++i] == '\0')
-					return haystack;
-				if (tolower((unsigned char)haystack[i]) != tolower((unsigned char)needle[i]))
-					break;
-			}
+
+	c = tolower((unsigned char)*needle);
+
+	for (; *haystack != '\0'; haystack++) {
+		if (tolower((unsigned char)*haystack) != c)
+			continue;
+
+		h = haystack + 1;
+		n = needle + 1;
+		while (*n != '\0' && *h != '\0' &&
+				tolower((unsigned char)*h) == tolower((unsigned char)*n)) {
+			h++;
+			n++;
 		}
+		if (*n == '\0')
+			return haystack;
 	}
+
 	return NULL;
 }
 
@@ -114,138 +127,6 @@ static const char *mirage_stristr_ascii(const char *haystack, const char *needle
 	}
 
 	return;
-        }
-
-        HOOKDEF(BOOL, WINAPI, EnumPrintersA, DWORD Flags, LPSTR Name, DWORD Level, LPBYTE pPrinterEnum, DWORD cbBuf, LPDWORD pcbNeeded, LPDWORD pcReturned)
-        {
-            typedef struct {
-		DWORD Flags;
-		LPSTR pDescription;
-		LPSTR pName;
-		LPSTR pComment;
-	} mirage_printer_info_1a_t;
-
-	BOOL ret;
-	lasterror_t lasterror;
-	static const char fake_name[] = "HP LaserJet 1020";
-	DWORD entry_size;
-	DWORD array_bytes;
-	DWORD string_bytes;
-	DWORD new_total;
-	DWORD name_off;
-	mirage_printer_info_1a_t *info;
-
-	ret = Old_EnumPrintersA(Flags, Name, Level, pPrinterEnum, cbBuf, pcbNeeded, pcReturned);
-
-	/* Samples call EnumPrintersA at Level 1, walk the returned
-	 * PRINTER_INFO_1A array, and drop the known virtual printers
-	 * (Microsoft Print to PDF, Microsoft XPS Document Writer, Fax,
-	 * OneNote for Windows 10, OneNote (Desktop)) by pName; if the surviving
-	 * physical-printer list is empty they treat the host as a bare analysis
-	 * VM with no real print hardware and checkCondition() flags it.
-	 * EnumPrinters is a two-pass API: a first call with an undersized buffer
-	 * fails with ERROR_INSUFFICIENT_BUFFER and reports the required size in
-	 * *pcbNeeded, then the caller retries with a large enough buffer. Grow
-	 * *pcbNeeded on the sizing pass, and on the successful data pass append
-	 * one synthetic PRINTER_INFO_1A whose pName is "HP LaserJet 1020" and
-	 * bump *pcReturned; that name survives the virtual-printer filter so
-	 * physicalPrinters becomes non-empty and checkCondition() returns true. */
-	if (!g_config.no_stealth && Level == 1 && pcbNeeded != NULL && pcReturned != NULL) {
-		get_lasterrors(&lasterror);
-
-		entry_size = (DWORD)(sizeof(mirage_printer_info_1a_t) + sizeof(fake_name));
-
-		if (!ret && lasterror.Win32Error == ERROR_INSUFFICIENT_BUFFER) {
-			/* sizing pass: reserve room for the extra synthetic entry so
-			   the caller's follow-up buffer is large enough to hold it */
-			*pcbNeeded += entry_size;
-		} else if (ret && pPrinterEnum != NULL) {
-			array_bytes = (DWORD)(sizeof(mirage_printer_info_1a_t) * (*pcReturned));
-			string_bytes = *pcbNeeded - array_bytes;
-			new_total = *pcbNeeded + entry_size;
-
-			if (cbBuf >= new_total) {
-				info = (mirage_printer_info_1a_t *)pPrinterEnum;
-
-				/* winspool packs the struct array at the front of the
-				   buffer and the strings at the tail. Place the new pName
-				   string just below the existing string block and the new
-				   struct slot right after the current array; both land in
-				   the previously-unused slack between them, so no existing
-				   struct or string is disturbed and the original entries'
-				   pointers stay valid. */
-				name_off = cbBuf - string_bytes - (DWORD)sizeof(fake_name);
-				memcpy(pPrinterEnum + name_off, fake_name, sizeof(fake_name));
-
-				info[*pcReturned].Flags = 0;
-				info[*pcReturned].pDescription = (LPSTR)(pPrinterEnum + name_off);
-				info[*pcReturned].pName = (LPSTR)(pPrinterEnum + name_off);
-				info[*pcReturned].pComment = (LPSTR)(pPrinterEnum + name_off);
-
-				*pcReturned += 1;
-				*pcbNeeded = new_total;
-			} else {
-				/* buffer lacks slack for the extra entry; report the larger
-				   size so the caller retries with a big enough buffer */
-				*pcbNeeded = new_total;
-			}
-		}
-
-		set_lasterrors(&lasterror);
-	}
-
-	return ret;
-        }
-
-        HOOKDEF(BOOL, WINAPI, FindNextFileA, HANDLE hFindFile, LPWIN32_FIND_DATAA lpFindFileData)
-        {
-            static const char *g_mirage_taskbar_fake_names[] = {
-		"Google Chrome.lnk",
-		"Spotify.lnk",
-	};
-	static unsigned int fake_enum_count;
-	BOOL ret;
-	lasterror_t lasterror;
-	unsigned int fake_total;
-
-	ret = Old_FindNextFileA(hFindFile, lpFindFileData);
-
-	fake_total = sizeof(g_mirage_taskbar_fake_names) / sizeof(g_mirage_taskbar_fake_names[0]);
-
-	/* Samples enumerate *.lnk entries under
-	 * %APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar
-	 * via FindFirstFileA/FindNextFileA, filter out the default pinned
-	 * shortcuts, and treat nonDefaultApps.size() < 2 as a bare sandbox with
-	 * no real user activity. The companion FindFirstFileA hook recognises
-	 * that TaskBar path and hands back a sentinel search handle
-	 * (0x00000001) so this continuation can be routed here. When the real
-	 * enumeration on that sentinel handle runs dry, synthesize at least two
-	 * non-default pinned shortcuts ("Google Chrome.lnk", "Spotify.lnk")
-	 * before finally returning FALSE/ERROR_NO_MORE_FILES, so
-	 * nonDefaultApps.size() >= 2 even without real files on disk and
-	 * checkCondition() classifies the host as a genuine user environment. */
-	if (!g_config.no_stealth && !ret && lpFindFileData != NULL &&
-			hFindFile == (HANDLE)0x00000001) {
-		get_lasterrors(&lasterror);
-
-		if (fake_enum_count < fake_total) {
-			memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAA));
-			lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
-			lstrcpyA(lpFindFileData->cFileName, g_mirage_taskbar_fake_names[fake_enum_count]);
-			lpFindFileData->nFileSizeLow = 2210;
-
-			fake_enum_count++;
-			ret = TRUE;
-		} else {
-			/* both synthetic pinned shortcuts emitted; end the enumeration cleanly */
-			ret = FALSE;
-			lasterror.Win32Error = ERROR_NO_MORE_FILES;
-		}
-
-		set_lasterrors(&lasterror);
-	}
-
-	return ret;
         }
 
         HOOKDEF(HANDLE, WINAPI, FindFirstFileA, LPCSTR lpFileName, LPWIN32_FIND_DATAA lpFindFileData)
