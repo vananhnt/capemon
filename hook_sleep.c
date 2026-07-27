@@ -141,108 +141,21 @@ docall:
 HOOKDEF(NTSTATUS, WINAPI, NtDelayExecution,
 	__in	BOOLEAN Alertable,
 	__in	PLARGE_INTEGER DelayInterval
-) {
-	NTSTATUS ret = 0;
-	LONGLONG interval;
-	FILETIME ft;
-	LARGE_INTEGER li;
-	LARGE_INTEGER newint;
-	unsigned long milli;
-	lasterror_t lasterror;
+)
+{
+NTSTATUS ret;
+	DWORD low = 0;
+	DWORD high = 0;
 
-	get_lasterrors(&lasterror);
+	ret = Old_NtDelayExecution(Alertable, DelayInterval);
 
-	if (!IsAddressAccessible(DelayInterval))
-		return STATUS_ACCESS_VIOLATION;
-
-	if (!is_aligned(DelayInterval, 4))
-		return STATUS_DATATYPE_MISALIGNMENT;
-
-	newint.QuadPart = DelayInterval->QuadPart;
-	// handle INFINITE sleep
-	if (newint.QuadPart == 0x8000000000000000ULL) {
-		LOQ_ntstatus("system", "is", "Milliseconds", -1, "Status", "Infinite");
-		goto docall;
+	if (DelayInterval != NULL) {
+		low = DelayInterval->LowPart;
+		high = (DWORD)DelayInterval->HighPart;
 	}
 
-	if (sleep_skip_active && newint.QuadPart > 0LL) {
-		/* convert absolute time to relative time */
-		if (Old_GetSystemTimeAsFileTime)
-			Old_GetSystemTimeAsFileTime(&ft);
-		else
-			GetSystemTimeAsFileTime(&ft);
+	LOQ_ntstatus("system", "ipii", "Alertable", (int)Alertable, "DelayInterval", DelayInterval, "LowPart", low, "HighPart", high);
 
-		newint.HighPart = ft.dwHighDateTime;
-		newint.LowPart = ft.dwLowDateTime;
-		newint.QuadPart += time_skipped.QuadPart;
-		newint.QuadPart -= DelayInterval->QuadPart;
-		if (newint.QuadPart > 0LL)
-			newint.QuadPart = 0LL;
-	}
-	interval = -newint.QuadPart;
-	milli = (unsigned long)(interval / 10000);
-
-	if (Old_GetSystemTimeAsFileTime)
-		Old_GetSystemTimeAsFileTime(&ft);
-	else
-		GetSystemTimeAsFileTime(&ft);
-	li.HighPart = ft.dwHighDateTime;
-	li.LowPart = ft.dwLowDateTime;
-
-	// check if we're still within the hardcoded limit
-	if (sleep_skip_active && (li.QuadPart < time_start.QuadPart + MAX_SLEEP_SKIP_DIFF * 10000)) {
-		time_skipped.QuadPart += interval;
-
-		if (num_skipped < 20) {
-			// notify how much we've skipped
-			LOQ_ntstatus("system", "is", "Milliseconds", milli, "Status", "Skipped");
-			num_skipped++;
-		}
-		else if (num_skipped == 20) {
-			LOQ_ntstatus("system", "s", "Status", "Skipped log limit reached");
-			num_skipped++;
-		}
-		goto skipcall;
-	}
-	/* clamp sleeps between 30 seconds and 1 hour down to 10 seconds  as long as we didn't force off sleep skipping */
-	else if (sleep_skip_active && milli >= 30000 && milli <= 3600000 && g_config.force_sleepskip != 0) {
-		newint.QuadPart = -(10000 * 10000);
-		time_skipped.QuadPart += interval - (10000 * 10000);
-		LOQ_ntstatus("system", "is", "Milliseconds", milli, "Status", "Skipped");
-		goto docall;
-	}
-	else if (sleep_skip_active && g_config.force_sleepskip > 0) {
-		time_skipped.QuadPart += interval;
-		LOQ_ntstatus("system", "is", "Milliseconds", milli, "Status", "Skipped");
-		newint.QuadPart = 0;
-		goto docall;
-	}
-	else {
-		disable_sleep_skip();
-	}
-	if (sleep_skip_active && milli <= 10) {
-		if (num_small < 20) {
-			LOQ_ntstatus("system", "i", "Milliseconds", milli);
-			num_small++;
-		}
-		else if (num_small == 20) {
-			LOQ_ntstatus("system", "s", "Status", "Small log limit reached");
-			num_small++;
-		}
-		else {
-			// likely using a bunch of tiny sleeps to delay execution, so let's suddenly mimic high load and give our
-			// fake passage of time the impression of longer delays to return from sleep
-			time_skipped.QuadPart += (randint(500, 1000) * 10000);
-		}
-	}
-	else {
-		LOQ_ntstatus("system", "i", "Milliseconds", milli);
-	}
-docall:
-	set_lasterrors(&lasterror);
-	return Old_NtDelayExecution(Alertable, &newint);
-skipcall:
-	set_lasterrors(&lasterror);
 	return ret;
 }
 
@@ -563,13 +476,22 @@ HOOKDEF(ULONGLONG, WINAPI, GetTickCount64,
 
 HOOKDEF(NTSTATUS, WINAPI, NtQuerySystemTime,
 	_Out_  PLARGE_INTEGER SystemTime
-) {
-	NTSTATUS ret = Old_NtQuerySystemTime(SystemTime);
-	LOQ_ntstatus("system", "");
-	if (NT_SUCCESS(ret) && sleep_skip_active) {
-		SystemTime->QuadPart += time_skipped.QuadPart;
+)
+{
+NTSTATUS ret;
+	DWORD low = 0;
+	DWORD high = 0;
+
+	ret = Old_NtQuerySystemTime(SystemTime);
+
+	if (SystemTime != NULL) {
+		low = SystemTime->LowPart;
+		high = (DWORD)SystemTime->HighPart;
 	}
-	return 0;
+
+	LOQ_ntstatus("system", "pii", "SystemTime", SystemTime, "LowPart", low, "HighPart", high);
+
+	return ret;
 }
 
 HOOKDEF(DWORD, WINAPI, timeGetTime,
@@ -590,24 +512,20 @@ HOOKDEF(DWORD, WINAPI, timeGetTime,
 
 HOOKDEF(void, WINAPI, GetSystemTimeAsFileTime,
 	_Out_ LPFILETIME lpSystemTimeAsFileTime
-) {
-	LARGE_INTEGER li;
-	FILETIME ft;
-	DWORD ret = 0;
+)
+{
+int ret = 0;
+	DWORD low = 0;
+	DWORD high = 0;
 
-	Old_GetSystemTimeAsFileTime(&ft);
+	Old_GetSystemTimeAsFileTime(lpSystemTimeAsFileTime);
 
-	if (sleep_skip_active) {
-		li.HighPart = ft.dwHighDateTime;
-		li.LowPart = ft.dwLowDateTime;
-		li.QuadPart += time_skipped.QuadPart;
-		ft.dwHighDateTime = li.HighPart;
-		ft.dwLowDateTime = li.LowPart;
+	if (lpSystemTimeAsFileTime != NULL) {
+		low = lpSystemTimeAsFileTime->dwLowDateTime;
+		high = lpSystemTimeAsFileTime->dwHighDateTime;
 	}
 
-	memcpy(lpSystemTimeAsFileTime, &ft, sizeof(ft));
-
-	LOQ_void("system", "");
+	LOQ_void("system", "pii", "lpSystemTimeAsFileTime", lpSystemTimeAsFileTime, "dwLowDateTime", low, "dwHighDateTime", high);
 
 	return;
 }
@@ -642,16 +560,50 @@ static int lastinput_called;
 
 HOOKDEF(BOOL, WINAPI, GetLastInputInfo,
 	_Out_ PLASTINPUTINFO plii
-) {
-	BOOL ret = Old_GetLastInputInfo(plii);
+)
+{
+/* Per-call sample index. Each successive stealth read reports a
+	 * dwTime that is a little further in the past than the last, so the
+	 * value keeps changing across the observation window while the
+	 * implied idle time stays small and well under the sample's
+	 * threshold. */
+	static unsigned int mirage_lastinput_sample;
+	BOOL ret;
+	lasterror_t lasterror;
+
+	ret = Old_GetLastInputInfo(plii);
 
 	LOQ_bool("system", "");
 
-	lastinput_called++;
+	/* Samples poll GetLastInputInfo across a ~300s window and derive
+	 * idleSeconds = (GetTickCount64() - LASTINPUTINFO.dwTime) / 1000,
+	 * treating the host as an unattended sandbox when two things hold
+	 * together: idle time is at or above 1800s (>= 30 minutes) on every
+	 * sample (allSamplesAboveThreshold), AND dwTime never moves across
+	 * the whole window (lastInputNeverChanged). A freshly-imaged
+	 * analysis VM with no interactive user never records real input, so
+	 * dwTime stays frozen at boot and the growing idle time trips both
+	 * conditions. The transparent answer is to make recent user input
+	 * look present and ongoing: report a dwTime just a few seconds
+	 * behind the current tick, and advance the reported "last input"
+	 * moment a little further back on each successive call so the value
+	 * is never identical between polls. That keeps idleSeconds far
+	 * below 1800s (so allSamplesAboveThreshold is false) and makes
+	 * dwTime change from one read to the next (so lastInputNeverChanged
+	 * is false), collapsing the combined AND and letting the sample read
+	 * the host as an actively-used desktop. lasterror is preserved
+	 * around the forged response. */
+	if (!g_config.no_stealth && plii != NULL &&
+			plii->cbSize >= sizeof(LASTINPUTINFO)) {
+		get_lasterrors(&lasterror);
 
-	/* fake recent user activity */
-	if (lastinput_called > 2 && plii && plii->cbSize == 8)
-		plii->dwTime = raw_gettickcount() + (DWORD)(time_skipped.QuadPart / 10000);
+		plii->dwTime = GetTickCount() - (500 + (mirage_lastinput_sample * 4500));
+		mirage_lastinput_sample++;
+
+		ret = TRUE;
+
+		set_lasterrors(&lasterror);
+	}
 
 	return ret;
 }

@@ -373,44 +373,14 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExW,
 	__inout	  LPWSTR lpClass,
 	__inout_opt  LPDWORD lpcClass,
 	__out_opt	PFILETIME lpftLastWriteTime
-) {
-	LONG ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcName, lpReserved,
-		lpClass, lpcClass, lpftLastWriteTime);
+)
+{
+LONG ret;
 
-	// fake the absence of some keys
-	if (!g_config.no_stealth && ret == ERROR_SUCCESS) {
-		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + MAX_KEY_BUFLEN;
-		PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
-		wchar_t *keypath = get_full_key_pathW(hKey, NULL, keybuf, allocsize);
-		int i, j;
+	ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
 
-		wchar_t *parent_keys[] = {
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT"
-		};
+	LOQ_zero("registry", "piu", "Handle", hKey, "Index", dwIndex, "Name", lpName);
 
-		wchar_t *replace_subkeys[] = {
-			L"VBOX__", L"DELL__",
-			L"VMware_", L"Dell_",
-			L"VMWar_", L"Dell_",
-		};
-
-		for (i = 0, j = 0; i < _countof(parent_keys); i += 1, j += 2) {
-			if (!wcsicmp(keypath, parent_keys[i]) && !wcsicmp(lpName, replace_subkeys[j])) {
-				wcscpy_s(lpName, sizeof(lpName), replace_subkeys[j + 1]);
-				break;
-			}
-		}
-
-		// fake some values
-		if (lpName && !g_config.no_stealth)
-			perform_unicode_registry_fakery(keypath, lpName, (ULONG)wcslen(lpName));
-		free(keybuf);
-	}
-
-	LOQ_zero("registry", "piuuE", "Handle", hKey, "Index", dwIndex, "Name", ret ? L"" : lpName,
-		"Class", ret ? L"" : lpClass, "FullName", hKey, ret ? L"" : lpName);
 	return ret;
 }
 
@@ -569,14 +539,81 @@ HOOKDEF(LONG, WINAPI, RegQueryValueExW,
 	__out_opt	LPDWORD lpType,
 	__out_opt	LPBYTE lpData,
 	__inout_opt  LPDWORD lpcbData
-) {
-	LONG ret;
+)
+{
+LONG ret;
+	lasterror_t lasterror;
+	/* User-application whitelist the sample matches DisplayName strings
+	   against (case-insensitive substring, needs >= 2 hits). "Slack" is the
+	   forced/lead value; rotating across subkeys yields distinct matches. */
+	static const wchar_t *whitelist[] = {
+		L"Slack",
+		L"Discord",
+		L"Notion",
+		L"Docker",
+		L"Visual Studio",
+	};
+	static unsigned int rotation;
+	const wchar_t *forged;
+	DWORD needed;
 	ENSURE_DWORD(lpType);
 	ret = Old_RegQueryValueExW(hKey, lpValueName, lpReserved, lpType,
 		lpData, lpcbData);
+
+	/* Samples enumerate the subkeys of
+	 * ...\Microsoft\Windows\CurrentVersion\Uninstall and read each subkey's
+	 * "DisplayName" value via RegQueryValueExW, lowercasing it and testing it
+	 * (appLower.find(keywordLower) != npos) against a whitelist of common user
+	 * applications (Slack, Discord, Notion, Docker, Visual Studio); fewer than
+	 * two whitelist hits reads as a bare analysis VM with no real user software
+	 * installed and the sample takes its sandbox-detected branch. A
+	 * freshly-imaged guest's Uninstall hive holds only OS/driver entries, so the
+	 * real DisplayName strings rarely match and the count stays below two.
+	 * RegQueryValueExW hands us only an HKEY, not the key path, so the
+	 * "DisplayName" value name is the discriminator here: whenever a DisplayName
+	 * string value is queried, answer with the next whitelisted application name
+	 * (starting with "Slack", then "Discord", ... rotating per successful read).
+	 * Because each enumerated Uninstall subkey issues its own DisplayName query,
+	 * consecutive subkeys report distinct whitelisted apps and the sample sees
+	 * >= 2 matches, classifying the host as a genuine user environment.
+	 * RegQueryValueExW is a two-pass API (lpData == NULL sizes the value, then
+	 * the caller retries with a buffer): report the forged string's size on the
+	 * sizing pass and only advance the rotation once the value is actually
+	 * delivered. */
+	if (!g_config.no_stealth && lpValueName != NULL &&
+			_wcsicmp(lpValueName, L"DisplayName") == 0 && lpcbData != NULL) {
+		get_lasterrors(&lasterror);
+
+		forged = whitelist[rotation % (sizeof(whitelist) / sizeof(whitelist[0]))];
+		needed = (DWORD)((lstrlenW(forged) + 1) * sizeof(wchar_t));
+
+		if (lpData == NULL) {
+			/* sizing pass: report the room the forged REG_SZ needs so the
+			   caller comes back with a large enough buffer */
+			*lpcbData = needed;
+			if (lpType != NULL)
+				*lpType = REG_SZ;
+			ret = ERROR_SUCCESS;
+		} else if (*lpcbData >= needed) {
+			memcpy(lpData, forged, needed);
+			*lpcbData = needed;
+			if (lpType != NULL)
+				*lpType = REG_SZ;
+			rotation++;
+			ret = ERROR_SUCCESS;
+		} else {
+			/* caller's buffer is too small; report the required size and let
+			   it retry, matching RegQueryValueExW's ERROR_MORE_DATA contract */
+			*lpcbData = needed;
+			ret = ERROR_MORE_DATA;
+		}
+
+		set_lasterrors(&lasterror);
+	}
+
 	if (ret == ERROR_SUCCESS && lpType != NULL && lpData != NULL &&
 			lpcbData != NULL) {
-		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + MAX_KEY_BUFLEN;
+		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + ((16384 + 256) * sizeof(wchar_t));
 		PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
 		wchar_t *keypath = get_full_keyvalue_pathW(hKey, lpValueName, keybuf, allocsize);
 
@@ -660,16 +697,83 @@ HOOKDEF(LONG, WINAPI, RegQueryInfoKeyW,
 	_Out_opt_	LPDWORD lpcMaxValueLen,
 	_Out_opt_	LPDWORD lpcbSecurityDescriptor,
 	_Out_opt_	PFILETIME lpftLastWriteTime
-) {
-	LONG ret = Old_RegQueryInfoKeyW(hKey, lpClass, lpcClass, lpReserved,
-		lpcSubKeys, lpcMaxSubKeyLen, lpcMaxClassLen, lpcValues,
-		lpcMaxValueNameLen, lpcMaxValueLen, lpcbSecurityDescriptor,
+)
+{
+/* KEY_NAME_INFORMATION as returned by NtQueryKey(KeyNameInformation):
+	   a byte-length-prefixed wide key path. Declared locally, and NtQueryKey
+	   resolved dynamically from ntdll, so this hook does not depend on which
+	   ntapi.h revision exposes the registry key info classes or the NtQueryKey
+	   prototype. */
+	typedef struct {
+		ULONG NameLength;
+		WCHAR Name[1];
+	} mirage_key_name_information_t;
+	typedef LONG (WINAPI *mirage_ntquerykey_t)(HANDLE, int, PVOID, ULONG, PULONG);
+	/* KEY_NAME_INFORMATION slot in KEY_INFORMATION_CLASS */
+	enum { MIRAGE_KEY_NAME_INFORMATION = 3 };
+
+	LONG ret;
+	lasterror_t lasterror;
+	HMODULE hNtdll;
+	mirage_ntquerykey_t pNtQueryKey;
+	mirage_key_name_information_t *key_name;
+	unsigned char name_buf[1024];
+	ULONG result_len;
+	int is_recentdocs;
+
+	ret = Old_RegQueryInfoKeyW(hKey, lpClass, lpcchClass, lpReserved,
+		lpcSubKeys, lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues,
+		lpcbMaxValueNameLen, lpcbMaxValueLen, lpcbSecurityDescriptor,
 		lpftLastWriteTime);
-	LOQ_zero("registry", "pU6I", "KeyHandle", hKey, "Class", lpcClass ? *lpcClass : 0, lpClass,
-		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcMaxSubKeyLen,
-		"MaxClassLength", lpcMaxClassLen, "ValueCount", lpcValues,
-		"MaxValueNameLength", lpcMaxValueNameLen,
-		"MaxValueLength", lpcMaxValueLen);
+
+	/* Samples enumerate HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\
+	 * RecentDocs and read its value count via RegQueryInfoKeyW's lpcValues
+	 * out-parameter, treating cValues <= 20 as a freshly-imaged analysis VM
+	 * whose most-recently-used document history was never populated by genuine
+	 * user activity, taking their sandbox-detected branch. A bare guest's
+	 * RecentDocs key holds only a handful of values (or none), so the real count
+	 * falls at or below the threshold. RegQueryInfoKeyW hands us only an HKEY,
+	 * not the key path, so resolve the handle's full registry path via
+	 * NtQueryKey(KeyNameInformation) and only forge when that path names the
+	 * RecentDocs key. When it does and the real count is <= 20, overwrite
+	 * *lpcValues with 25 so the count clears the > 20 threshold and the sample
+	 * classifies the host as a lived-in user profile, running its normal
+	 * behaviour. */
+	if (!g_config.no_stealth && ret == ERROR_SUCCESS &&
+			lpcValues != NULL && *lpcValues <= 20) {
+		get_lasterrors(&lasterror);
+
+		is_recentdocs = 0;
+		hNtdll = GetModuleHandleA("ntdll.dll");
+		if (hNtdll != NULL) {
+			pNtQueryKey = (mirage_ntquerykey_t)GetProcAddress(hNtdll, "NtQueryKey");
+			if (pNtQueryKey != NULL) {
+				result_len = 0;
+				memset(name_buf, 0, sizeof(name_buf));
+				/* leave room for a trailing NUL when NtQueryKey fills the buffer */
+				if (pNtQueryKey(hKey, MIRAGE_KEY_NAME_INFORMATION, name_buf,
+						(ULONG)(sizeof(name_buf) - sizeof(WCHAR)), &result_len) == 0) {
+					key_name = (mirage_key_name_information_t *)name_buf;
+					if (key_name->NameLength <
+							sizeof(name_buf) - sizeof(mirage_key_name_information_t))
+						key_name->Name[key_name->NameLength / sizeof(WCHAR)] = L'\0';
+					if (wcsstr(key_name->Name, L"RecentDocs") != NULL)
+						is_recentdocs = 1;
+				}
+			}
+		}
+
+		if (is_recentdocs)
+			*lpcValues = 25;
+
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_zero("registry", "pU6I", "KeyHandle", hKey, "Class", lpcchClass ? *lpcchClass : 0, lpClass,
+		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcbMaxSubKeyLen,
+		"MaxClassLength", lpcbMaxClassLen, "ValueCount", lpcValues,
+		"MaxValueNameLength", lpcbMaxValueNameLen,
+		"MaxValueLength", lpcbMaxValueLen);
 	return ret;
 }
 

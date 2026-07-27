@@ -667,12 +667,171 @@ HOOKDEF(BOOL, WINAPI, HttpQueryInfoA,
 	_Inout_ LPVOID	lpvBuffer,
 	_Inout_ LPDWORD   lpdwBufferLength,
 	_Inout_ LPDWORD   lpdwIndex
-) {
-	BOOL ret = Old_HttpQueryInfoA(hRequest, dwInfoLevel, lpvBuffer, lpdwBufferLength, lpdwIndex);
-	if (dwInfoLevel == HTTP_QUERY_DATE || dwInfoLevel == HTTP_QUERY_EXPIRES || dwInfoLevel == HTTP_QUERY_REQUEST_METHOD || dwInfoLevel == HTTP_QUERY_CONTENT_TYPE || dwInfoLevel == HTTP_QUERY_STATUS_TEXT || dwInfoLevel == HTTP_QUERY_RAW_HEADERS_CRLF)
-		LOQ_bool("network", "phS", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", ret ? *lpdwBufferLength : 0, lpvBuffer);
+)
+{
+/* RFC1123 day-of-week and month abbreviations for the forged
+	 * "Ddd, DD Mon YYYY HH:MM:SS GMT" HTTP Date value (fixed 29 chars). */
+	static const char *mirage_http_days[7] =
+		{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+	static const char *mirage_http_months[12] =
+		{ "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+		  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+	/* Base UTC (FILETIME 100ns units) captured on the first stealth call; the
+	   synthetic Date advances from this fixed anchor by capemon's accumulated
+	   skipped-sleep time so consecutive reads move forward by exactly the
+	   duration the caller believes elapsed. */
+	static ULONGLONG base_ft;
+	static BOOL base_set;
+	/* Base query id with the modifier flags (SYSTEMTIME/NUMBER/COALESCE/
+	   NUMBER64/REQUEST_HEADERS occupy bits 27..31) masked off. */
+	#define MIRAGE_HTTP_QUERY_ID_MASK 0x07FFFFFF
+	/* wininet.h HTTP_QUERY_* literal ids (no constants available here) */
+	#define MIRAGE_HTTP_QUERY_CONTENT_TYPE     1
+	#define MIRAGE_HTTP_QUERY_DATE             9
+	#define MIRAGE_HTTP_QUERY_EXPIRES          10
+	#define MIRAGE_HTTP_QUERY_STATUS_TEXT      20
+	#define MIRAGE_HTTP_QUERY_RAW_HEADERS      21
+	#define MIRAGE_HTTP_QUERY_RAW_HEADERS_CRLF 22
+	#define MIRAGE_HTTP_QUERY_REQUEST_METHOD   45
+	#define MIRAGE_HTTP_QUERY_FLAG_NUMBER      0x20000000
+	#define MIRAGE_HTTP_QUERY_FLAG_SYSTEMTIME  0x40000000
+	BOOL ret;
+	lasterror_t lasterror;
+	DWORD level;
+	DWORD need;
+	SYSTEMTIME now_st;
+	SYSTEMTIME syn_st;
+	FILETIME ft;
+	ULARGE_INTEGER u;
+	char date_buf[40];
+
+	ret = Old_HttpQueryInfoA(hRequest, dwInfoLevel, lpBuffer, lpdwBufferLength, lpdwIndex);
+	if (dwInfoLevel == MIRAGE_HTTP_QUERY_DATE || dwInfoLevel == MIRAGE_HTTP_QUERY_EXPIRES || dwInfoLevel == MIRAGE_HTTP_QUERY_REQUEST_METHOD || dwInfoLevel == MIRAGE_HTTP_QUERY_CONTENT_TYPE || dwInfoLevel == MIRAGE_HTTP_QUERY_STATUS_TEXT || dwInfoLevel == MIRAGE_HTTP_QUERY_RAW_HEADERS_CRLF)
+		LOQ_bool("network", "phS", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", ret ? *lpdwBufferLength : 0, lpBuffer);
 	else
-		LOQ_bool("network", "phB", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", lpdwBufferLength, lpvBuffer);
+		LOQ_bool("network", "phB", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", lpdwBufferLength, lpBuffer);
+
+	/* Samples use an external wall-clock reference to detect a sandbox that
+	 * fast-forwards Sleep(): they fetch the HTTP 'Date' response header from a
+	 * trusted host (e.g. www.google.com) via HttpQueryInfoA
+	 * (HTTP_QUERY_DATE, or by scraping HTTP_QUERY_RAW_HEADERS), record it as
+	 * beforeSleepTime, call Sleep(120000), fetch the Date again as
+	 * afterSleepTime, and check abs((afterSleepTime - beforeSleepTime) - 120)
+	 * > 10. A sandbox that shortcuts the 120s Sleep to speed up analysis makes
+	 * the two Date reads only a couple of real seconds apart, so the measured
+	 * delta is far from the requested 120s and the sample concludes it is
+	 * being accelerated. The transparent answer is to forge the external time
+	 * source itself so it advances in lock-step with the time capemon skips:
+	 * capture a fixed base UTC on the first read, then report base +
+	 * time_skipped on every read. capemon accumulates every millisecond it
+	 * shortcuts from a blocking/sleeping call into the shared time_skipped
+	 * counter, so between the pre-Sleep and post-Sleep reads the Date advances
+	 * by exactly the fast-forwarded Sleep (120s), driving the measured delta
+	 * back onto the requested duration regardless of how little real time
+	 * passed. Using the same shared time_skipped keeps this network-time view
+	 * consistent with the tick-based views (GetTickCount64 et al.). The value
+	 * is written as a synthetic monotonic RFC1123 Date for the string and
+	 * SYSTEMTIME forms of HTTP_QUERY_DATE, and rewritten in place inside the
+	 * Date header line for the raw-headers forms. lasterror is preserved. */
+	level = dwInfoLevel & MIRAGE_HTTP_QUERY_ID_MASK;
+	if (!g_config.no_stealth && ret && lpBuffer != NULL &&
+			(level == MIRAGE_HTTP_QUERY_DATE || level == MIRAGE_HTTP_QUERY_RAW_HEADERS ||
+			 level == MIRAGE_HTTP_QUERY_RAW_HEADERS_CRLF)) {
+		get_lasterrors(&lasterror);
+
+		/* establish the monotonic synthetic clock: base captured once, then
+		   advanced by capemon's accumulated skipped-sleep time (milliseconds,
+		   converted to FILETIME 100ns units). */
+		if (!base_set) {
+			GetSystemTime(&now_st);
+			if (SystemTimeToFileTime(&now_st, &ft)) {
+				u.LowPart = ft.dwLowDateTime;
+				u.HighPart = ft.dwHighDateTime;
+				base_ft = u.QuadPart;
+			}
+			base_set = TRUE;
+		}
+		u.QuadPart = base_ft + (ULONGLONG)time_skipped.QuadPart * 10000ull;
+		ft.dwLowDateTime = u.LowPart;
+		ft.dwHighDateTime = u.HighPart;
+		memset(&syn_st, 0, sizeof(syn_st));
+		FileTimeToSystemTime(&ft, &syn_st);
+
+		_snprintf(date_buf, sizeof(date_buf),
+			"%s, %02u %s %04u %02u:%02u:%02u GMT",
+			mirage_http_days[syn_st.wDayOfWeek % 7], syn_st.wDay,
+			mirage_http_months[(syn_st.wMonth ? syn_st.wMonth - 1 : 0) % 12],
+			syn_st.wYear, syn_st.wHour, syn_st.wMinute, syn_st.wSecond);
+		date_buf[sizeof(date_buf) - 1] = '\0';
+		need = (DWORD)strlen(date_buf);
+
+		if (level == MIRAGE_HTTP_QUERY_DATE && (dwInfoLevel & MIRAGE_HTTP_QUERY_FLAG_SYSTEMTIME)) {
+			/* SYSTEMTIME form: the caller passed a SYSTEMTIME buffer */
+			if (lpdwBufferLength != NULL &&
+					*lpdwBufferLength >= (DWORD)sizeof(SYSTEMTIME)) {
+				memcpy(lpBuffer, &syn_st, sizeof(SYSTEMTIME));
+				*lpdwBufferLength = (DWORD)sizeof(SYSTEMTIME);
+			}
+		} else if (level == MIRAGE_HTTP_QUERY_DATE &&
+				!(dwInfoLevel & MIRAGE_HTTP_QUERY_FLAG_NUMBER)) {
+			/* string form: RFC1123 date text, replaced with the synthetic one */
+			if (lpdwBufferLength != NULL && *lpdwBufferLength >= need) {
+				memcpy(lpBuffer, date_buf, need);
+				if (*lpdwBufferLength > need)
+					((char *)lpBuffer)[need] = '\0';
+				*lpdwBufferLength = need;
+			}
+		} else if (level == MIRAGE_HTTP_QUERY_RAW_HEADERS ||
+				level == MIRAGE_HTTP_QUERY_RAW_HEADERS_CRLF) {
+			/* raw-headers form: find the Date: header line and overwrite its
+			   value in place. Both the server's and the synthetic value are
+			   fixed-length RFC1123 (29 chars), so an exact-length in-place
+			   replacement leaves the surrounding header block untouched. */
+			char *hdr;
+			DWORD blen;
+			DWORD i;
+			DWORD v;
+			DWORD lineend;
+			DWORD avail;
+
+			hdr = (char *)lpBuffer;
+			blen = (lpdwBufferLength != NULL) ? *lpdwBufferLength : 0;
+			for (i = 0; blen >= 5 && i + 5 <= blen; i++) {
+				if (!(i == 0 || hdr[i - 1] == '\n' || hdr[i - 1] == '\0'))
+					continue;
+				if (_strnicmp(&hdr[i], "Date:", 5) != 0)
+					continue;
+
+				v = i + 5;
+				while (v < blen && (hdr[v] == ' ' || hdr[v] == '\t'))
+					v++;
+				lineend = v;
+				while (lineend < blen && hdr[lineend] != '\r' &&
+						hdr[lineend] != '\n' && hdr[lineend] != '\0')
+					lineend++;
+				avail = lineend - v;
+
+				/* only replace when the existing value is exactly the same
+				   fixed RFC1123 width, so no header bytes are shifted */
+				if (avail == need)
+					memcpy(&hdr[v], date_buf, need);
+				break;
+			}
+		}
+
+		set_lasterrors(&lasterror);
+	}
+	#undef MIRAGE_HTTP_QUERY_ID_MASK
+	#undef MIRAGE_HTTP_QUERY_CONTENT_TYPE
+	#undef MIRAGE_HTTP_QUERY_DATE
+	#undef MIRAGE_HTTP_QUERY_EXPIRES
+	#undef MIRAGE_HTTP_QUERY_STATUS_TEXT
+	#undef MIRAGE_HTTP_QUERY_RAW_HEADERS
+	#undef MIRAGE_HTTP_QUERY_RAW_HEADERS_CRLF
+	#undef MIRAGE_HTTP_QUERY_REQUEST_METHOD
+	#undef MIRAGE_HTTP_QUERY_FLAG_NUMBER
+	#undef MIRAGE_HTTP_QUERY_FLAG_SYSTEMTIME
+
 	return ret;
 }
 

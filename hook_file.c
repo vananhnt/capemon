@@ -1484,14 +1484,136 @@ HOOKDEF(HANDLE, WINAPI, FindFirstFileExW,
 HOOKDEF(BOOL, WINAPI, FindNextFileW,
 	__in HANDLE hFindFile,
 	__out LPWIN32_FIND_DATAW lpFindFileData
-) {
-	BOOL ret = Old_FindNextFileW(hFindFile, lpFindFileData);
+)
+{
+static const wchar_t *g_mirage_taskbar_fake_names_w[] = {
+		L"Mozilla Firefox.lnk",
+		L"Adobe Acrobat Reader DC.lnk",
+	};
+	static const struct { const wchar_t *name; DWORD size; } g_mirage_downloads_fake_entries[] = {
+		{ L"setup.exe", 48213004 },
+		{ L"installer_x64.msi", 26314820 },
+		{ L"report_final.pdf", 1842310 },
+		{ L"invoice_2025_04.pdf", 88213 },
+		{ L"photo_2025.jpg", 3731004 },
+		{ L"vacation.png", 2210442 },
+		{ L"archive.zip", 15230884 },
+		{ L"backup.7z", 92318442 },
+		{ L"song.mp3", 5231004 },
+		{ L"movie_trailer.mp4", 74213880 },
+		{ L"spreadsheet.xlsx", 41205 },
+		{ L"presentation.pptx", 1804231 },
+		{ L"notes.txt", 4096 },
+		{ L"resume.docx", 45210 },
+		{ L"driver_update.exe", 12938440 },
+		{ L"ebook.epub", 2831004 },
+		{ L"dataset.csv", 884213 },
+		{ L"screenshot.png", 442310 },
+		{ L"contract.pdf", 194502 },
+		{ L"profile.jpg", 731004 },
+	};
+	static unsigned int fake_enum_count_w;
+	static HANDLE g_mirage_downloads_last_handle;
+	static unsigned int g_mirage_downloads_count;
+	BOOL ret;
+	lasterror_t lasterror;
+	unsigned int fake_total;
+	unsigned int table_total;
+	unsigned int idx;
+
+	ret = Old_FindNextFileW(hFindFile, lpFindFileData);
 
 	while (!g_config.no_stealth && ret && (
 		!wcsicmp(lpFindFileData->cFileName, g_config.w_analyzer + 3) ||
 		!wcsicmp(lpFindFileData->cFileName, g_config.w_results + 3) ||
 		!wcsicmp(lpFindFileData->cFileName, g_config.w_pythonpath + 3))) {
 		ret = Old_FindNextFileW(hFindFile, lpFindFileData);
+	}
+
+	fake_total = sizeof(g_mirage_taskbar_fake_names_w) / sizeof(g_mirage_taskbar_fake_names_w[0]);
+	table_total = sizeof(g_mirage_downloads_fake_entries) / sizeof(g_mirage_downloads_fake_entries[0]);
+
+	if (!g_config.no_stealth && !ret && lpFindFileData != NULL &&
+			hFindFile == (HANDLE)0x00000002) {
+		/* Unicode counterpart of the FindNextFileA hook. The pinned-apps
+		 * count is reached through SHGetFolderPathW/PathCombineW, so the
+		 * enumeration of %APPDATA%\Microsoft\Internet Explorer\Quick
+		 * Launch\User Pinned\TaskBar\*.lnk runs on the wide exports and
+		 * never touches the A thunks. Continue the enumeration started by
+		 * the paired FindFirstFileW hook (sentinel handle 0x00000002,
+		 * which emits "Google Chrome.lnk") and synthesize the extra
+		 * shortcuts so nonDefaultApps.size() >= minPinnedAppsThreshold,
+		 * then report FALSE/ERROR_NO_MORE_FILES to end the loop cleanly. */
+		get_lasterrors(&lasterror);
+
+		if (fake_enum_count_w < fake_total) {
+			memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAW));
+			lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
+			lstrcpyW(lpFindFileData->cFileName, g_mirage_taskbar_fake_names_w[fake_enum_count_w]);
+			lpFindFileData->nFileSizeLow = 2210;
+
+			fake_enum_count_w++;
+			ret = TRUE;
+		} else {
+			/* fake entries exhausted; end the enumeration cleanly */
+			ret = FALSE;
+			lasterror.Win32Error = ERROR_NO_MORE_FILES;
+		}
+
+		set_lasterrors(&lasterror);
+	}
+	/* Samples enumerate FOLDERID_Downloads with std::filesystem::directory_iterator,
+	 * which resolves to FindFirstFileExW/FindNextFileW, count the entries returned,
+	 * and treat a total below ~100 as a freshly-imaged analysis VM whose Downloads
+	 * folder was never populated by a real user. We only get FindNextFileW here
+	 * (the FindFirstFileExW that opened the search is not hooked in this step), so
+	 * the search handle is opaque and the path is not directly visible; instead we
+	 * key a running item tally off the active find handle, resetting it whenever a
+	 * new handle drives the enumeration. Real entries are passed through untouched
+	 * and counted. When the real enumeration on that handle runs dry
+	 * (FALSE / ERROR_NO_MORE_FILES) before the 100-item floor is reached, synthesize
+	 * plausible Downloads entries — installers, documents, media, archives — and keep
+	 * returning TRUE until the tally reaches 100, then let the genuine
+	 * end-of-enumeration through so the walk terminates cleanly and the folder looks
+	 * like a real user's Downloads even without VM pre-population. The taskbar
+	 * sentinel handle (0x00000002) is handled above and excluded here. */
+	else if (!g_config.no_stealth && lpFindFileData != NULL &&
+			hFindFile != NULL && hFindFile != INVALID_HANDLE_VALUE &&
+			hFindFile != (HANDLE)0x00000002) {
+		get_lasterrors(&lasterror);
+
+		if (hFindFile != g_mirage_downloads_last_handle) {
+			/* a different search handle is now driving enumeration: restart the
+			   running item tally so counts stay scoped to one directory walk */
+			g_mirage_downloads_last_handle = hFindFile;
+			g_mirage_downloads_count = 0;
+		}
+
+		if (ret) {
+			/* genuine entry: leave the buffer as-is and count it toward the floor */
+			g_mirage_downloads_count++;
+		} else if (lasterror.Win32Error == ERROR_NO_MORE_FILES &&
+				g_mirage_downloads_count < 100) {
+			/* real enumeration exhausted before 100 items: emit a synthetic entry.
+			   The first pass uses the plausible fixed names; beyond the table we
+			   prefix a running index so every synthesized cFileName stays unique. */
+			idx = g_mirage_downloads_count % table_total;
+
+			memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAW));
+			lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
+			if (g_mirage_downloads_count < table_total)
+				lstrcpyW(lpFindFileData->cFileName, g_mirage_downloads_fake_entries[idx].name);
+			else
+				wsprintfW(lpFindFileData->cFileName, L"%u_%s",
+					g_mirage_downloads_count, g_mirage_downloads_fake_entries[idx].name);
+			lpFindFileData->nFileSizeLow = g_mirage_downloads_fake_entries[idx].size;
+
+			g_mirage_downloads_count++;
+			ret = TRUE;
+			lasterror.Win32Error = ERROR_SUCCESS;
+		}
+
+		set_lasterrors(&lasterror);
 	}
 
 	// not logging this due to the flood of logs it would cause

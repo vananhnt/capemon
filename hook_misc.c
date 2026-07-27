@@ -599,41 +599,21 @@ static int lasty;
 
 HOOKDEF(BOOL, WINAPI, GetCursorPos,
 	_Out_ LPPOINT lpPoint
-) {
-	ENSURE_STRUCT(lpPoint, POINT);
-	BOOL ret = Old_GetCursorPos(lpPoint);
+)
+{
+BOOL ret;
+	int x = 0;
+	int y = 0;
 
-	/* work around the fact that skipping sleeps prevents the human module from making the system look active */
-	if (ret && time_skipped.QuadPart != last_skipped.QuadPart) {
-		int xres, yres;
-		xres = our_GetSystemMetrics(0);
-		yres = our_GetSystemMetrics(1);
-		if (!num_to_spoof)
-			num_to_spoof = (random() % 20) + 10;
-		if (num_spoofed < num_to_spoof) {
-			lpPoint->x = random() % xres;
-			lpPoint->y = random() % yres;
-			num_spoofed++;
-		}
-		else {
-			lpPoint->x = lastx;
-			lpPoint->y = lasty;
-			lastx = lpPoint->x;
-			lasty = lpPoint->y;
-		}
-		last_skipped.QuadPart = time_skipped.QuadPart;
-	}
-	else if (last_skipped.QuadPart == 0) {
-		last_skipped.QuadPart = time_skipped.QuadPart;
+	ret = Old_GetCursorPos(lpPoint);
+
+	if (lpPoint != NULL) {
+		x = (int)lpPoint->x;
+		y = (int)lpPoint->y;
 	}
 
-	if (ret){
-			LOQ_bool("misc", "ii", "x", lpPoint != NULL ? lpPoint->x : 0,
-				 "y", lpPoint != NULL ? lpPoint->y : 0);
-	}
-	else{
-		LOQ_bool("misc", "ii", "x", 0, "y", 0);
-	}
+	LOQ_bool("system", "pii", "lpPoint", lpPoint, "x", x, "y", y);
+
 	return ret;
 }
 
@@ -722,16 +702,14 @@ static unsigned int asynckeystate_logcount;
 
 HOOKDEF(SHORT, WINAPI, GetAsyncKeyState,
 	__in int vKey
-) {
-	SHORT ret = Old_GetAsyncKeyState(vKey);
-	if (asynckeystate_logcount < 50 && ((vKey >= 0x30 && vKey <= 0x39) || (vKey >= 0x41 && vKey <= 0x5a))) {
-		asynckeystate_logcount++;
-		LOQ_nonzero("windows", "i", "KeyCode", vKey);
-	}
-	else if (asynckeystate_logcount == 50) {
-		asynckeystate_logcount++;
-		LOQ_nonzero("windows", "is", "KeyCode", vKey, "Status", "Log limit reached");
-	}
+)
+{
+SHORT ret;
+
+	ret = Old_GetAsyncKeyState(vKey);
+
+	LOQ_nonzero("system", "ii", "vKey", vKey, "KeyState", (int)ret);
+
 	return ret;
 }
 
@@ -788,13 +766,29 @@ HOOKDEF(NTSTATUS, WINAPI, RtlCompressBuffer,
 
 HOOKDEF(void, WINAPI, GetSystemInfo,
 	__out LPSYSTEM_INFO lpSystemInfo
-) {
+)
+{
+lasterror_t lasterror;
 	int ret = 0;
 
 	Old_GetSystemInfo(lpSystemInfo);
 
-	if (!g_config.no_stealth && lpSystemInfo->dwNumberOfProcessors < SPOOFED_CPU_CORE_NUM)
-		lpSystemInfo->dwNumberOfProcessors = SPOOFED_CPU_CORE_NUM;
+	/* Samples read SYSTEM_INFO.dwNumberOfProcessors as a logical-CPU count and
+	 * treat anything below 8 as a stripped-down analysis VM rather than a
+	 * genuine multi-core user desktop, taking their sandbox-detected branch and
+	 * refusing to run. Overwrite the reported processor count with 8 so the
+	 * caller's >= 8 threshold classifies the host as a real user environment;
+	 * this hook-side fix holds even when the VM itself cannot be reconfigured
+	 * to expose 8 vCPUs. */
+	if (!g_config.no_stealth) {
+		if (lpSystemInfo != NULL && lpSystemInfo->dwNumberOfProcessors < 8) {
+			get_lasterrors(&lasterror);
+
+			lpSystemInfo->dwNumberOfProcessors = 8;
+
+			set_lasterrors(&lasterror);
+		}
+	}
 
 	LOQ_void("misc", "");
 
@@ -1202,10 +1196,45 @@ HOOKDEF(void, WINAPI, GlobalMemoryStatus,
 
 HOOKDEF(BOOL, WINAPI, GlobalMemoryStatusEx,
 	_Out_ LPMEMORYSTATUSEX lpBuffer
-) {
-	BOOL ret = Old_GlobalMemoryStatusEx(lpBuffer);
+)
+{
+BOOL ret;
+	lasterror_t lasterror;
+	ULONGLONG orig_total_phys;
+	double scale;
+
+	ret = Old_GlobalMemoryStatusEx(lpBuffer);
+
 	if (ret && !g_config.no_stealth && lpBuffer->ullTotalPhys < SPOOFED_RAM)
 		lpBuffer->ullTotalPhys = SPOOFED_RAM;
+
+	/* Samples read MEMORYSTATUSEX.ullTotalPhys after a successful
+	 * GlobalMemoryStatusEx call, convert it to gigabytes, and treat a total
+	 * physical RAM figure of 15 GB or less as a stripped-down analysis VM
+	 * rather than a genuine user desktop (the benign path requires
+	 * memorySizeGB > 15), taking their sandbox-detected branch and refusing
+	 * to run. A freshly-imaged guest is usually provisioned with only a few
+	 * gigabytes, so the real figure falls well short of the threshold.
+	 * Overwrite ullTotalPhys with 34359738368 (32 GB) so memorySizeGB
+	 * computes > 15 and the sample classifies the host as a real user
+	 * environment, even when the VM itself cannot be reconfigured with more
+	 * physical memory. */
+	if (!g_config.no_stealth && ret && lpBuffer != NULL &&
+			lpBuffer->ullTotalPhys <= 34359738368ull) {
+		get_lasterrors(&lasterror);
+
+		orig_total_phys = lpBuffer->ullTotalPhys;
+		scale = orig_total_phys ? (double)34359738368ull / (double)orig_total_phys : 1.0;
+
+		/* keep Avail/Virtual fields internally consistent with the forged total */
+		lpBuffer->ullAvailPhys = (ULONGLONG)(lpBuffer->ullAvailPhys * scale);
+		lpBuffer->ullTotalVirtual = (ULONGLONG)(lpBuffer->ullTotalVirtual * scale);
+		lpBuffer->ullAvailVirtual = (ULONGLONG)(lpBuffer->ullAvailVirtual * scale);
+		lpBuffer->ullTotalPhys = 34359738368ull;
+
+		set_lasterrors(&lasterror);
+	}
+
 	LOQ_void("misc", "ii", "MemoryLoad", lpBuffer->dwMemoryLoad, "TotalPhysicalMB", lpBuffer->ullTotalPhys / (1024 * 1024));
 	return ret;
 }
@@ -1674,10 +1703,83 @@ HOOKDEF(HKL, WINAPI, GetKeyboardLayout,
 	DWORD idThread
 )
 {
-	HKL ret = Old_GetKeyboardLayout(idThread);
+/* Realistic input-language HKLs to rotate through, mimicking a user
+	 * who occasionally toggles input languages. Low word is the locale
+	 * (US English, UK English, French, German); the high word mirrors
+	 * it as the KLID does for the default layout of each locale. Having
+	 * >= 3 distinct values defeats the "unique HKL count == 2 &&
+	 * rapid toggle" ping-pong branch as well as the "never changes"
+	 * branch. */
+	static const ULONG_PTR mirage_layouts[] = {
+		(ULONG_PTR)0x04090409,
+		(ULONG_PTR)0x08090809,
+		(ULONG_PTR)0x040C040C,
+		(ULONG_PTR)0x04070407,
+	};
+	/* Rotating state kept across calls so successive polls see an organic,
+	   slowly-changing layout. cur_idx selects the current HKL; next_tick is
+	   the GetTickCount64 timestamp at which we advance to the next layout;
+	   rng is a small LCG that spaces the changes at irregular intervals all
+	   comfortably above the sample's 1000ms toggle-detection floor. */
+	static unsigned int mirage_cur_idx;
+	static ULONGLONG mirage_next_tick;
+	static unsigned int mirage_rng = 0x1a2b3c4d;
+	static BOOL mirage_started;
+	HKL ret;
+	const char* LanguageName = NULL;
+	lasterror_t lasterror;
+	ULONGLONG now;
+	unsigned int layout_count;
+	unsigned int gap_ms;
+
+	ret = Old_GetKeyboardLayout(idThread);
 	if (g_config.lang)
 		ret = (HKL)(DWORD_PTR)g_config.lang;
-	const char* LanguageName = NULL;
+
+	/* Samples poll the foreground thread's keyboard layout (HKL) every ~500ms
+	 * over a 120s window and flag a sandbox on either of two shapes: the
+	 * handle never changes (changeCount == 0), or it flips between exactly two
+	 * values with a sub-1000ms toggle interval (the mechanical ping-pong a
+	 * naive spoof produces). A headless analysis VM with no interactive user
+	 * never switches input language, so the real handle is constant and the
+	 * "never changes" branch fires. Answer transparently by returning a
+	 * rotating set of >= 3 realistic layout handles, advancing to the next one
+	 * only after a pseudo-random gap above 1000ms has elapsed (tracked via
+	 * GetTickCount64). This yields organic-looking, irregular input-language
+	 * switches: changeCount climbs above zero, more than two distinct HKLs are
+	 * observed, and no two changes land within 1000ms, so both the
+	 * never-changes and rapid-two-value branches stay false and the host reads
+	 * as an actively-used desktop. lasterror is preserved around the forged
+	 * return. */
+	if (!g_config.no_stealth) {
+		get_lasterrors(&lasterror);
+
+		layout_count = (unsigned int)(sizeof(mirage_layouts) / sizeof(mirage_layouts[0]));
+		now = GetTickCount64();
+
+		if (!mirage_started) {
+			/* first stealth poll: seed the change timer with an initial
+			   above-floor gap so the layout holds steady before its first
+			   organic switch */
+			mirage_rng = mirage_rng * 1103515245u + 12345u;
+			gap_ms = 1500u + ((mirage_rng >> 16) % 8500u);
+			mirage_next_tick = now + gap_ms;
+			mirage_started = TRUE;
+		} else if (now >= mirage_next_tick) {
+			/* enough real time has passed since the last change: advance to
+			   the next layout and schedule the following switch at a fresh
+			   pseudo-random interval strictly greater than 1000ms */
+			mirage_cur_idx = (mirage_cur_idx + 1) % layout_count;
+			mirage_rng = mirage_rng * 1103515245u + 12345u;
+			gap_ms = 1500u + ((mirage_rng >> 16) % 8500u);
+			mirage_next_tick = now + gap_ms;
+		}
+
+		ret = (HKL)mirage_layouts[mirage_cur_idx];
+
+		set_lasterrors(&lasterror);
+	}
+
 	if (ret)
 		LanguageName = GetLanguageName((LANGID)ret);
 	if (LanguageName)
