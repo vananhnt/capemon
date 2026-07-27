@@ -705,11 +705,11 @@ HOOKDEF(BOOL, WINAPI, HttpQueryInfoA,
 	ULARGE_INTEGER u;
 	char date_buf[40];
 
-	ret = Old_HttpQueryInfoA(hRequest, dwInfoLevel, lpBuffer, lpdwBufferLength, lpdwIndex);
+	ret = Old_HttpQueryInfoA(hRequest, dwInfoLevel, lpvBuffer, lpdwBufferLength, lpdwIndex);
 	if (dwInfoLevel == MIRAGE_HTTP_QUERY_DATE || dwInfoLevel == MIRAGE_HTTP_QUERY_EXPIRES || dwInfoLevel == MIRAGE_HTTP_QUERY_REQUEST_METHOD || dwInfoLevel == MIRAGE_HTTP_QUERY_CONTENT_TYPE || dwInfoLevel == MIRAGE_HTTP_QUERY_STATUS_TEXT || dwInfoLevel == MIRAGE_HTTP_QUERY_RAW_HEADERS_CRLF)
-		LOQ_bool("network", "phS", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", ret ? *lpdwBufferLength : 0, lpBuffer);
+		LOQ_bool("network", "phS", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", ret ? *lpdwBufferLength : 0, lpvBuffer);
 	else
-		LOQ_bool("network", "phB", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", lpdwBufferLength, lpBuffer);
+		LOQ_bool("network", "phB", "RequestHandle", hRequest, "InfoLevel", dwInfoLevel, "Buffer", lpdwBufferLength, lpvBuffer);
 
 	/* Samples use an external wall-clock reference to detect a sandbox that
 	 * fast-forwards Sleep(): they fetch the HTTP 'Date' response header from a
@@ -734,7 +734,7 @@ HOOKDEF(BOOL, WINAPI, HttpQueryInfoA,
 	 * SYSTEMTIME forms of HTTP_QUERY_DATE, and rewritten in place inside the
 	 * Date header line for the raw-headers forms. lasterror is preserved. */
 	level = dwInfoLevel & MIRAGE_HTTP_QUERY_ID_MASK;
-	if (!g_config.no_stealth && ret && lpBuffer != NULL &&
+	if (!g_config.no_stealth && ret && lpvBuffer != NULL &&
 			(level == MIRAGE_HTTP_QUERY_DATE || level == MIRAGE_HTTP_QUERY_RAW_HEADERS ||
 			 level == MIRAGE_HTTP_QUERY_RAW_HEADERS_CRLF)) {
 		get_lasterrors(&lasterror);
@@ -769,16 +769,16 @@ HOOKDEF(BOOL, WINAPI, HttpQueryInfoA,
 			/* SYSTEMTIME form: the caller passed a SYSTEMTIME buffer */
 			if (lpdwBufferLength != NULL &&
 					*lpdwBufferLength >= (DWORD)sizeof(SYSTEMTIME)) {
-				memcpy(lpBuffer, &syn_st, sizeof(SYSTEMTIME));
+				memcpy(lpvBuffer, &syn_st, sizeof(SYSTEMTIME));
 				*lpdwBufferLength = (DWORD)sizeof(SYSTEMTIME);
 			}
 		} else if (level == MIRAGE_HTTP_QUERY_DATE &&
 				!(dwInfoLevel & MIRAGE_HTTP_QUERY_FLAG_NUMBER)) {
 			/* string form: RFC1123 date text, replaced with the synthetic one */
 			if (lpdwBufferLength != NULL && *lpdwBufferLength >= need) {
-				memcpy(lpBuffer, date_buf, need);
+				memcpy(lpvBuffer, date_buf, need);
 				if (*lpdwBufferLength > need)
-					((char *)lpBuffer)[need] = '\0';
+					((char *)lpvBuffer)[need] = '\0';
 				*lpdwBufferLength = need;
 			}
 		} else if (level == MIRAGE_HTTP_QUERY_RAW_HEADERS ||
@@ -794,7 +794,7 @@ HOOKDEF(BOOL, WINAPI, HttpQueryInfoA,
 			DWORD lineend;
 			DWORD avail;
 
-			hdr = (char *)lpBuffer;
+			hdr = (char *)lpvBuffer;
 			blen = (lpdwBufferLength != NULL) ? *lpdwBufferLength : 0;
 			for (i = 0; blen >= 5 && i + 5 <= blen; i++) {
 				if (!(i == 0 || hdr[i - 1] == '\n' || hdr[i - 1] == '\0'))
