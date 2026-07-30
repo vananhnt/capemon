@@ -3927,4 +3927,54 @@ HOOKDEF(DWORD, WINAPI, MapFileAndCheckSumA,
 	_Out_ PDWORD CheckSum
 );
 
+/* ==== complete_hooks.py generated (gen10 test batch) ==== */
+
+HOOKDEF(VOID, WINAPI, Sleep,
+	_In_ DWORD dwMilliseconds
+);
+
+HOOKDEF(BOOL, WINAPI, AreFileApisANSI,
+	void
+);
+
+HOOKDEF(int, WINAPI, MulDiv,
+	_In_ int nNumber,
+	_In_ int nNumerator,
+	_In_ int nDenominator
+);
+
+HOOKDEF(DWORD, WINAPI, GetSysColor,
+	_In_ int nIndex
+);
+
+HOOKDEF(DWORD, WINAPI, GetModuleFileNameW,
+	_In_opt_ HMODULE hModule,
+	_Out_ LPWSTR lpFilename,
+	_In_ DWORD nSize
+);
+
+HOOKDEF(UINT, WINAPI, GetWindowsDirectoryA,
+	_Out_ LPSTR lpBuffer,
+	_In_ UINT uSize
+);
+
+HOOKDEF(DWORD, WINAPI, ExpandEnvironmentStringsA,
+	_In_ LPCSTR lpSrc,
+	_Out_opt_ LPSTR lpDst,
+	_In_ DWORD nSize
+);
+
+HOOKDEF(BOOL, WINAPI, IsWow64Process,
+	_In_ HANDLE hProcess,
+	_Out_ PBOOL Wow64Process
+);
+
+HOOKDEF(HGDIOBJ, WINAPI, GetStockObject,
+	_In_ int fnObject
+);
+
+HOOKDEF(HWND, WINAPI, GetDesktopWindow,
+	void
+);
+
 #include "hook_vbscript.h"

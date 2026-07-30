@@ -2024,3 +2024,41 @@ HOOKDEF(NTSTATUS, WINAPI, NtPowerInformation,
 		"OutputBuffer", OutputBufferLength, OutputBuffer);
 	return ret;
 }
+
+/* ==== complete_hooks.py generated (gen10 test batch) ==== */
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Large Integer
+// REVIEW: 戻り型 int の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(int, WINAPI, MulDiv, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ int nNumber,
+	_In_ int nNumerator,
+	_In_ int nDenominator
+) {
+	int ret;
+	ret = Old_MulDiv(nNumber, nNumerator, nDenominator);
+	LOQ_nonzero("misc", "iii", "Number", nNumber, "Numerator", nNumerator, "Denominator", nDenominator);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:System Information Functions
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(DWORD, WINAPI, ExpandEnvironmentStringsA, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPCSTR lpSrc,
+	_Out_opt_ LPSTR lpDst,
+	_In_ DWORD nSize
+) {
+	DWORD ret;
+	ret = Old_ExpandEnvironmentStringsA(lpSrc, lpDst, nSize);
+	LOQ_nonzero("misc", "ssi", "Src", lpSrc, "Dst", lpDst, "Size", nSize);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+HOOKDEF(HGDIOBJ, WINAPI, GetStockObject, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ int fnObject
+) {
+	HGDIOBJ ret;
+	ret = Old_GetStockObject(fnObject);
+	LOQ_nonnull("misc", "i", "NObject", fnObject);
+	return ret;
+}

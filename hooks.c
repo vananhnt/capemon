@@ -818,6 +818,16 @@ hook_t full_hooks[] = {
 	HOOK_SPECIAL(vbscript, VbsRound),
 	HOOK_SPECIAL(vbscript, VbsPrint),
     /* SAGE_HOOKS_BEGIN */
+	HOOK(kernel32, Sleep),
+	HOOK(kernel32, AreFileApisANSI),
+	HOOK(kernel32, MulDiv),
+	HOOK(user32, GetSysColor),
+	HOOK(kernel32, GetModuleFileNameW),
+	HOOK(kernel32, GetWindowsDirectoryA),
+	HOOK(kernel32, ExpandEnvironmentStringsA),
+	HOOK(kernel32, IsWow64Process),
+	HOOK(gdi32, GetStockObject),
+	HOOK(user32, GetDesktopWindow),
     /* SAGE_HOOKS_END */
 };
 
