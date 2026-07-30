@@ -700,3 +700,23 @@ HOOKDEF(LONG, WINAPI, RegNotifyChangeKeyValue,
 
 	return ret;
 }
+
+/* ==== complete_hooks.py generated batch (all-free) ==== */
+
+// -> hook_reg.c に追加 | category="registry" | winapi:Registry
+// REVIEW: 戻り型 LONG の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 pvData: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(LONG, WINAPI, RegGetValueA, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HKEY hkey,
+	_In_opt_ LPCSTR lpSubKey,
+	_In_opt_ LPCSTR lpValue,
+	_In_opt_ DWORD dwFlags,
+	_Out_opt_ LPDWORD pdwType,
+	_Out_opt_ PVOID pvData,
+	_Inout_opt_ LPDWORD pcbData
+) {
+	LONG ret;
+	ret = Old_RegGetValueA(hkey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData);
+	LOQ_nonzero("registry", "pssiIpI", "Key", hkey, "SubKey", lpSubKey, "Value", lpValue, "Flags", dwFlags, "DwType", pdwType, "VData", pvData, "CbData", pcbData);
+	return ret;
+}

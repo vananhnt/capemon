@@ -2024,3 +2024,531 @@ HOOKDEF(NTSTATUS, WINAPI, NtPowerInformation,
 		"OutputBuffer", OutputBufferLength, OutputBuffer);
 	return ret;
 }
+
+/* ==== complete_hooks.py generated batch (all-free) ==== */
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Font and Text
+// REVIEW: 戻り型 HFONT の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lplf: 型 const LOGFONT* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(HFONT, WINAPI, CreateFontIndirectW, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ const LOGFONT* lplf
+) {
+	HFONT ret;
+	ret = Old_CreateFontIndirectW(lplf);
+	LOQ_nonzero("misc", "p", "Lf", lplf);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+HOOKDEF(BOOL, WINAPI, DeleteDC, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdc
+) {
+	BOOL ret;
+	ret = Old_DeleteDC(hdc);
+	LOQ_bool("misc", "p", "Dc", hdc);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+HOOKDEF(BOOL, WINAPI, DeleteObject, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HGDIOBJ hObject
+) {
+	BOOL ret;
+	ret = Old_DeleteObject(hObject);
+	LOQ_bool("misc", "p", "Object", hObject);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Font and Text
+// REVIEW: 戻り型 int の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpDTParams: 型 LPDRAWTEXTPARAMS は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(int, WINAPI, DrawTextExW, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdc,
+	_Inout_ LPWSTR lpchText,
+	_In_ int cchText,
+	_Inout_ LPRECT lprc,
+	_In_ UINT dwDTFormat,
+	_In_ LPDRAWTEXTPARAMS lpDTParams
+) {
+	int ret;
+	ret = Old_DrawTextExW(hdc, lpchText, cchText, lprc, dwDTFormat, lpDTParams);
+	LOQ_nonzero("misc", "puiPip", "Dc", hdc, "ChText", lpchText, "Text", cchText, "Rc", lprc, "DTFormat", dwDTFormat, "DTParams", lpDTParams);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+HOOKDEF(BOOL, WINAPI, EnumDisplaySettingsW, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPCWSTR lpszDeviceName,
+	_In_ DWORD iModeNum,
+	_Out_ DEVMODE* lpDevMode
+) {
+	BOOL ret;
+	ret = Old_EnumDisplaySettingsW(lpszDeviceName, iModeNum, lpDevMode);
+	LOQ_bool("misc", "uiP", "SzDeviceName", lpszDeviceName, "IModeNum", iModeNum, "DevMode", lpDevMode);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:System Information Functions
+// REVIEW: 戻り型 UINT の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 pFirmwareTableBuffer: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(UINT, WINAPI, EnumSystemFirmwareTables, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ DWORD FirmwareTableProviderSignature,
+	_Out_ PVOID pFirmwareTableBuffer,
+	_In_ DWORD BufferSize
+) {
+	UINT ret;
+	ret = Old_EnumSystemFirmwareTables(FirmwareTableProviderSignature, pFirmwareTableBuffer, BufferSize);
+	LOQ_nonzero("misc", "ipi", "FirmwareTableProviderSignature", FirmwareTableProviderSignature, "FirmwareTableBuffer", pFirmwareTableBuffer, "BufferSize", BufferSize);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:System Information Functions
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(DWORD, WINAPI, ExpandEnvironmentStringsA, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPCSTR lpSrc,
+	_Out_opt_ LPSTR lpDst,
+	_In_ DWORD nSize
+) {
+	DWORD ret;
+	ret = Old_ExpandEnvironmentStringsA(lpSrc, lpDst, nSize);
+	LOQ_nonzero("misc", "ssi", "Src", lpSrc, "Dst", lpDst, "Size", nSize);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+HOOKDEF(HGDIOBJ, WINAPI, GetCurrentObject, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdc,
+	_In_ UINT uObjectType
+) {
+	HGDIOBJ ret;
+	ret = Old_GetCurrentObject(hdc, uObjectType);
+	LOQ_nonnull("misc", "pi", "Dc", hdc, "UObjectType", uObjectType);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+HOOKDEF(HDC, WINAPI, GetDC, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HWND hWnd
+) {
+	HDC ret;
+	ret = Old_GetDC(hWnd);
+	LOQ_nonnull("misc", "p", "Wnd", hWnd);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+// REVIEW: 引数 hrgnClip: 型 HRGN は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(HDC, WINAPI, GetDCEx, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HWND hWnd,
+	_In_ HRGN hrgnClip,
+	_In_ DWORD flags
+) {
+	HDC ret;
+	ret = Old_GetDCEx(hWnd, hrgnClip, flags);
+	LOQ_nonnull("misc", "ppi", "Wnd", hWnd, "RgnClip", hrgnClip, "Lags", flags);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+// REVIEW: 戻り型 int の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(int, WINAPI, GetDeviceCaps, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdc,
+	_In_ int nIndex
+) {
+	int ret;
+	ret = Old_GetDeviceCaps(hdc, nIndex);
+	LOQ_nonzero("misc", "pi", "Dc", hdc, "Index", nIndex);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:System Information Functions
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(DWORD, WINAPI, GetEnvironmentVariableA, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_opt_ LPCSTR lpName,
+	_Out_opt_ LPSTR lpBuffer,
+	_In_ DWORD nSize
+) {
+	DWORD ret;
+	ret = Old_GetEnvironmentVariableA(lpName, lpBuffer, nSize);
+	LOQ_nonzero("misc", "ssi", "Name", lpName, "Buffer", lpBuffer, "Size", nSize);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Multiple Display Monitors
+// REVIEW: 引数 hMonitor: 型 HMONITOR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(BOOL, WINAPI, GetMonitorInfoW, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HMONITOR hMonitor,
+	_Out_ LPMONITORINFO lpmi
+) {
+	BOOL ret;
+	ret = Old_GetMonitorInfoW(hMonitor, lpmi);
+	LOQ_bool("misc", "pP", "Monitor", hMonitor, "Mi", lpmi);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+// REVIEW: 戻り型 int の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpvObject: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(int, WINAPI, GetObjectW, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HGDIOBJ hgdiobj,
+	_In_ int cbBuffer,
+	_Out_ LPVOID lpvObject
+) {
+	int ret;
+	ret = Old_GetObjectW(hgdiobj, cbBuffer, lpvObject);
+	LOQ_nonzero("misc", "pip", "Gdiobj", hgdiobj, "Buffer", cbBuffer, "VObject", lpvObject);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+HOOKDEF(HGDIOBJ, WINAPI, GetStockObject, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ int fnObject
+) {
+	HGDIOBJ ret;
+	ret = Old_GetStockObject(fnObject);
+	LOQ_nonnull("misc", "i", "NObject", fnObject);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:System Information Functions
+// REVIEW: 戻り型 UINT の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 pFirmwareTableBuffer: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(UINT, WINAPI, GetSystemFirmwareTable, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ DWORD FirmwareTableProviderSignature,
+	_In_ DWORD FirmwareTableID,
+	_Out_ PVOID pFirmwareTableBuffer,
+	_In_ DWORD BufferSize
+) {
+	UINT ret;
+	ret = Old_GetSystemFirmwareTable(FirmwareTableProviderSignature, FirmwareTableID, pFirmwareTableBuffer, BufferSize);
+	LOQ_nonzero("misc", "iipi", "FirmwareTableProviderSignature", FirmwareTableProviderSignature, "FirmwareTableID", FirmwareTableID, "FirmwareTableBuffer", pFirmwareTableBuffer, "BufferSize", BufferSize);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Painting and Drawing
+// REVIEW: 引数 lpRect: 型 const RECT* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(BOOL, WINAPI, InvalidateRect, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HWND hWnd,
+	_In_ const RECT* lpRect,
+	_In_ BOOL bErase
+) {
+	BOOL ret;
+	ret = Old_InvalidateRect(hWnd, lpRect, bErase);
+	LOQ_bool("misc", "ppi", "Wnd", hWnd, "Rect", lpRect, "Erase", bErase);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Large Integer
+// REVIEW: 戻り型 int の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(int, WINAPI, MulDiv, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ int nNumber,
+	_In_ int nNumerator,
+	_In_ int nDenominator
+) {
+	int ret;
+	ret = Old_MulDiv(nNumber, nNumerator, nDenominator);
+	LOQ_nonzero("misc", "iii", "Number", nNumber, "Numerator", nNumerator, "Denominator", nDenominator);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpNetResource: 型 LPNETRESOURCE は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+// REVIEW: 引数 lpPassword: 型 LPTSTR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+// REVIEW: 引数 lpUserName: 型 LPTSTR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(DWORD, WINAPI, NPAddConnection, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPNETRESOURCE lpNetResource,
+	_In_ LPTSTR lpPassword,
+	_In_ LPTSTR lpUserName
+) {
+	DWORD ret;
+	ret = Old_NPAddConnection(lpNetResource, lpPassword, lpUserName);
+	LOQ_nonzero("misc", "ppp", "NetResource", lpNetResource, "Password", lpPassword, "UserName", lpUserName);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpNetResource: 型 LPNETRESOURCE は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+// REVIEW: 引数 lpPassword: 型 LPTSTR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+// REVIEW: 引数 lpUserName: 型 LPTSTR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(DWORD, WINAPI, NPAddConnection3, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HWND hwndOwner,
+	_In_ LPNETRESOURCE lpNetResource,
+	_In_ LPTSTR lpPassword,
+	_In_ LPTSTR lpUserName,
+	_In_ DWORD dwFlags
+) {
+	DWORD ret;
+	ret = Old_NPAddConnection3(hwndOwner, lpNetResource, lpPassword, lpUserName, dwFlags);
+	LOQ_nonzero("misc", "ppppi", "WndOwner", hwndOwner, "NetResource", lpNetResource, "Password", lpPassword, "UserName", lpUserName, "Flags", dwFlags);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpName: 型 LPTSTR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(DWORD, WINAPI, NPCancelConnection, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPTSTR lpName,
+	_In_ BOOL fForce
+) {
+	DWORD ret;
+	ret = Old_NPCancelConnection(lpName, fForce);
+	LOQ_nonzero("misc", "pi", "Name", lpName, "Force", fForce);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(DWORD, WINAPI, NPCloseEnum, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HANDLE hEnum
+) {
+	DWORD ret;
+	ret = Old_NPCloseEnum(hEnum);
+	LOQ_nonzero("misc", "p", "Enum", hEnum);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpBuffer: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(DWORD, WINAPI, NPEnumResource, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HANDLE hEnum,
+	_Inout_ LPDWORD lpcCount,
+	_Out_ LPVOID lpBuffer,
+	_Inout_ LPDWORD lpBufferSize
+) {
+	DWORD ret;
+	ret = Old_NPEnumResource(hEnum, lpcCount, lpBuffer, lpBufferSize);
+	LOQ_nonzero("misc", "pIpI", "Enum", hEnum, "CCount", lpcCount, "Buffer", lpBuffer, "BufferSize", lpBufferSize);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(DWORD, WINAPI, NPGetCaps, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ DWORD nIndex
+) {
+	DWORD ret;
+	ret = Old_NPGetCaps(nIndex);
+	LOQ_nonzero("misc", "i", "Index", nIndex);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpLocalName: 型 LPTSTR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(DWORD, WINAPI, NPGetConnection, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPTSTR lpLocalName,
+	_Out_ LPTSTR lpRemoteName,
+	_Inout_ LPDWORD lpBufferSize
+) {
+	DWORD ret;
+	ret = Old_NPGetConnection(lpLocalName, lpRemoteName, lpBufferSize);
+	LOQ_nonzero("misc", "pPI", "LocalName", lpLocalName, "RemoteName", lpRemoteName, "BufferSize", lpBufferSize);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpBuffer: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(DWORD, WINAPI, NPGetConnection3, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPCWSTR lpLocalName,
+	_In_ DWORD dwLevel,
+	_Out_ LPVOID lpBuffer,
+	_Inout_ LPDWORD lpBufferSize
+) {
+	DWORD ret;
+	ret = Old_NPGetConnection3(lpLocalName, dwLevel, lpBuffer, lpBufferSize);
+	LOQ_nonzero("misc", "uipI", "LocalName", lpLocalName, "Level", dwLevel, "Buffer", lpBuffer, "BufferSize", lpBufferSize);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpRemoteName: 型 LPTSTR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(DWORD, WINAPI, NPGetConnectionPerformance, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPTSTR lpRemoteName,
+	_Out_ LPNETCONNECTINFOSTRUCT lpNetConnectInfo
+) {
+	DWORD ret;
+	ret = Old_NPGetConnectionPerformance(lpRemoteName, lpNetConnectInfo);
+	LOQ_nonzero("misc", "pP", "RemoteName", lpRemoteName, "NetConnectInfo", lpNetConnectInfo);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpNetResource: 型 LPNETRESOURCE は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+// REVIEW: 引数 lpBuffer: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(DWORD, WINAPI, NPGetResourceInformation, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPNETRESOURCE lpNetResource,
+	_Out_ LPVOID lpBuffer,
+	_Inout_ LPDWORD lpcbBuffer,
+	_Out_ LPTSTR* lplpSystem
+) {
+	DWORD ret;
+	ret = Old_NPGetResourceInformation(lpNetResource, lpBuffer, lpcbBuffer, lplpSystem);
+	LOQ_nonzero("misc", "ppIP", "NetResource", lpNetResource, "Buffer", lpBuffer, "CbBuffer", lpcbBuffer, "LpSystem", lplpSystem);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpNetResource: 型 LPNETRESOURCE は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+// REVIEW: 引数 lpBuffer: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(DWORD, WINAPI, NPGetResourceParent, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPNETRESOURCE lpNetResource,
+	_Out_ LPVOID lpBuffer,
+	_Inout_ LPDWORD lpcbBuffer
+) {
+	DWORD ret;
+	ret = Old_NPGetResourceParent(lpNetResource, lpBuffer, lpcbBuffer);
+	LOQ_nonzero("misc", "ppI", "NetResource", lpNetResource, "Buffer", lpBuffer, "CbBuffer", lpcbBuffer);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpLocalPath: 型 LPCTSTR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+// REVIEW: 引数 lpBuffer: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(DWORD, WINAPI, NPGetUniversalName, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPCTSTR lpLocalPath,
+	_In_ DWORD dwInfoLevel,
+	_Out_ LPVOID lpBuffer,
+	_Inout_ LPDWORD lpBufferSize
+) {
+	DWORD ret;
+	ret = Old_NPGetUniversalName(lpLocalPath, dwInfoLevel, lpBuffer, lpBufferSize);
+	LOQ_nonzero("misc", "pipI", "LocalPath", lpLocalPath, "InfoLevel", dwInfoLevel, "Buffer", lpBuffer, "BufferSize", lpBufferSize);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpName: 型 LPTSTR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(DWORD, WINAPI, NPGetUser, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPTSTR lpName,
+	_Out_ LPTSTR lpUserName,
+	_Inout_ LPDWORD lpBufferSize
+) {
+	DWORD ret;
+	ret = Old_NPGetUser(lpName, lpUserName, lpBufferSize);
+	LOQ_nonzero("misc", "pPI", "Name", lpName, "UserName", lpUserName, "BufferSize", lpBufferSize);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpNetResource: 型 LPNETRESOURCE は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(DWORD, WINAPI, NPOpenEnum, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ DWORD dwScope,
+	_In_ DWORD dwType,
+	_In_ DWORD dwUsage,
+	_In_ LPNETRESOURCE lpNetResource,
+	_Out_ LPHANDLE lphEnum
+) {
+	DWORD ret;
+	ret = Old_NPOpenEnum(dwScope, dwType, dwUsage, lpNetResource, lphEnum);
+	LOQ_nonzero("misc", "iiipP", "Scope", dwScope, "Type", dwType, "Usage", dwUsage, "NetResource", lpNetResource, "HEnum", lphEnum);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Structured Exception Handling
+HOOKDEF(void, WINAPI, RaiseException, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ DWORD dwExceptionCode,
+	_In_ DWORD dwExceptionFlags,
+	_In_ DWORD nNumberOfArguments,
+	_In_ const ULONG_PTR* lpArguments
+) {
+	ULONG_PTR ret = 0; (void)ret;  // void 関数: LOQ 用ダミー
+	Old_RaiseException(dwExceptionCode, dwExceptionFlags, nNumberOfArguments, lpArguments);
+	LOQ_void("misc", "iiiI", "ExceptionCode", dwExceptionCode, "ExceptionFlags", dwExceptionFlags, "NumberOfArguments", nNumberOfArguments, "Arguments", lpArguments);
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+// REVIEW: 戻り型 int の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(int, WINAPI, ReleaseDC, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HWND hWnd,
+	_In_ HDC hDC
+) {
+	int ret;
+	ret = Old_ReleaseDC(hWnd, hDC);
+	LOQ_nonzero("misc", "pp", "Wnd", hWnd, "DC", hDC);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Conversion and Manipulation
+// REVIEW: 引数 psa: 型 SAFEARRAY* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(HRESULT, WINAPI, SafeArrayGetElement, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ SAFEARRAY* psa,
+	_In_ LONG* rgIndices,
+	_Out_ void* pv
+) {
+	HRESULT ret;
+	ret = Old_SafeArrayGetElement(psa, rgIndices, pv);
+	LOQ_hresult("misc", "pIP", "Sa", psa, "RgIndices", rgIndices, "V", pv);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Conversion and Manipulation
+// REVIEW: 引数 psa: 型 SAFEARRAY* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(HRESULT, WINAPI, SafeArrayGetLBound, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ SAFEARRAY* psa,
+	_In_ UINT nDim,
+	_Out_ LONG* plLbound
+) {
+	HRESULT ret;
+	ret = Old_SafeArrayGetLBound(psa, nDim, plLbound);
+	LOQ_hresult("misc", "piI", "Sa", psa, "Dim", nDim, "LLbound", plLbound);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Conversion and Manipulation
+// REVIEW: 引数 psa: 型 SAFEARRAY* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(HRESULT, WINAPI, SafeArrayGetUBound, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ SAFEARRAY* psa,
+	_In_ UINT nDim,
+	_Out_ LONG* plUbound
+) {
+	HRESULT ret;
+	ret = Old_SafeArrayGetUBound(psa, nDim, plUbound);
+	LOQ_hresult("misc", "piI", "Sa", psa, "Dim", nDim, "LUbound", plUbound);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Device Context
+HOOKDEF(HGDIOBJ, WINAPI, SelectObject, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdc,
+	_In_ HGDIOBJ hgdiobj
+) {
+	HGDIOBJ ret;
+	ret = Old_SelectObject(hdc, hgdiobj);
+	LOQ_nonnull("misc", "pp", "Dc", hdc, "Gdiobj", hgdiobj);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Painting and Drawing
+// REVIEW: 戻り型 int の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(int, WINAPI, SetBkMode, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdc,
+	_In_ int iBkMode
+) {
+	int ret;
+	ret = Old_SetBkMode(hdc, iBkMode);
+	LOQ_nonzero("misc", "pi", "Dc", hdc, "IBkMode", iBkMode);
+	return ret;
+}
+
+// -> hook_misc.c に追加 | category="misc" | winapi:Font and Text
+// REVIEW: 戻り型 COLORREF の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 crColor: 型 COLORREF を i(int32)で仮記録。要確認
+HOOKDEF(COLORREF, WINAPI, SetTextColor, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdc,
+	_In_ COLORREF crColor
+) {
+	COLORREF ret;
+	ret = Old_SetTextColor(hdc, crColor);
+	LOQ_nonzero("misc", "pi", "Dc", hdc, "CrColor", crColor);
+	return ret;
+}

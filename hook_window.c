@@ -525,3 +525,324 @@ HOOKDEF(int, WINAPI, MessageBoxTimeoutW,
 		LOQ_zero("windows", "uui", "Text", lpszText, "Caption", lpszCaption, "Timeout", dwTimeout);
 	return ret;
 }
+
+/* ==== complete_hooks.py generated batch (all-free) ==== */
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows GDI
+HOOKDEF(BOOL, WINAPI, BitBlt, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdcDest,
+	_In_ int nXDest,
+	_In_ int nYDest,
+	_In_ int nWidth,
+	_In_ int nHeight,
+	_In_ HDC hdcSrc,
+	_In_ int nXSrc,
+	_In_ int nYSrc,
+	_In_ DWORD dwRop
+) {
+	BOOL ret;
+	ret = Old_BitBlt(hdcDest, nXDest, nYDest, nWidth, nHeight, hdcSrc, nXSrc, nYSrc, dwRop);
+	LOQ_bool("windows", "piiiipiii", "DcDest", hdcDest, "XDest", nXDest, "YDest", nYDest, "Width", nWidth, "Height", nHeight, "DcSrc", hdcSrc, "XSrc", nXSrc, "YSrc", nYSrc, "Rop", dwRop);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Hooks
+// REVIEW: 戻り型 LRESULT の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 hhk: 型 HHOOK は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+// REVIEW: 引数 wParam: 型 WPARAM を i(int32)で仮記録。要確認
+// REVIEW: 引数 lParam: 型 LPARAM は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(LRESULT, WINAPI, CallNextHookEx, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_opt_ HHOOK hhk,
+	_In_ int nCode,
+	_In_ WPARAM wParam,
+	_In_ LPARAM lParam
+) {
+	LRESULT ret;
+	ret = Old_CallNextHookEx(hhk, nCode, wParam, lParam);
+	LOQ_nonzero("windows", "piip", "Hk", hhk, "Code", nCode, "WParam", wParam, "LParam", lParam);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows GDI
+HOOKDEF(HBITMAP, WINAPI, CreateCompatibleBitmap, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdc,
+	_In_ int nWidth,
+	_In_ int nHeight
+) {
+	HBITMAP ret;
+	ret = Old_CreateCompatibleBitmap(hdc, nWidth, nHeight);
+	LOQ_nonnull("windows", "pii", "Dc", hdc, "Width", nWidth, "Height", nHeight);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows GDI
+// REVIEW: 引数 pbmi: 型 const BITMAPINFO* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(HBITMAP, WINAPI, CreateDIBSection, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdc,
+	_In_ const BITMAPINFO* pbmi,
+	_In_ UINT iUsage,
+	_Out_ VOID** ppvBits,
+	_In_ HANDLE hSection,
+	_In_ DWORD dwOffset
+) {
+	HBITMAP ret;
+	ret = Old_CreateDIBSection(hdc, pbmi, iUsage, ppvBits, hSection, dwOffset);
+	LOQ_nonnull("windows", "ppiPpi", "Dc", hdc, "Bmi", pbmi, "IUsage", iUsage, "PvBits", ppvBits, "Section", hSection, "Offset", dwOffset);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows GDI
+// REVIEW: 戻り型 HBRUSH の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 crColor: 型 COLORREF を i(int32)で仮記録。要確認
+HOOKDEF(HBRUSH, WINAPI, CreateSolidBrush, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ COLORREF crColor
+) {
+	HBRUSH ret;
+	ret = Old_CreateSolidBrush(crColor);
+	LOQ_nonzero("windows", "i", "CrColor", crColor);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Messages and Message Queues
+// REVIEW: 戻り型 LRESULT の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpmsg: 型 const MSG* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(LRESULT, WINAPI, DispatchMessageW, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ const MSG* lpmsg
+) {
+	LRESULT ret;
+	ret = Old_DispatchMessageW(lpmsg);
+	LOQ_nonzero("windows", "p", "Msg", lpmsg);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows GDI
+// REVIEW: 戻り型 int の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lprc: 型 const RECT* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+// REVIEW: 引数 hbr: 型 HBRUSH は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(int, WINAPI, FillRect, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hDC,
+	_In_ const RECT* lprc,
+	_In_ HBRUSH hbr
+) {
+	int ret;
+	ret = Old_FillRect(hDC, lprc, hbr);
+	LOQ_nonzero("windows", "ppp", "DC", hDC, "Rc", lprc, "Br", hbr);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows GDI
+// REVIEW: 戻り型 int の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpvBits: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(int, WINAPI, GetDIBits, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HDC hdc,
+	_In_ HBITMAP hbmp,
+	_In_ UINT uStartScan,
+	_In_ UINT cScanLines,
+	_Out_ LPVOID lpvBits,
+	_Inout_ LPBITMAPINFO lpbi,
+	_In_ UINT uUsage
+) {
+	int ret;
+	ret = Old_GetDIBits(hdc, hbmp, uStartScan, cScanLines, lpvBits, lpbi, uUsage);
+	LOQ_nonzero("windows", "ppiipPi", "Dc", hdc, "Bmp", hbmp, "UStartScan", uStartScan, "CScanLines", cScanLines, "VBits", lpvBits, "Bi", lpbi, "UUsage", uUsage);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows
+HOOKDEF(HWND, WINAPI, GetDesktopWindow, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	void
+) {
+	HWND ret;
+	ret = Old_GetDesktopWindow();
+	LOQ_nonnull("windows", "");
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows
+HOOKDEF(HWND, WINAPI, GetForegroundWindow, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	void
+) {
+	HWND ret;
+	ret = Old_GetForegroundWindow();
+	LOQ_nonnull("windows", "");
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Window Station and Desktop
+HOOKDEF(HWINSTA, WINAPI, GetProcessWindowStation, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	void
+) {
+	HWINSTA ret;
+	ret = Old_GetProcessWindowStation();
+	LOQ_nonnull("windows", "");
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(DWORD, WINAPI, GetSysColor, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ int nIndex
+) {
+	DWORD ret;
+	ret = Old_GetSysColor(nIndex);
+	LOQ_nonzero("windows", "i", "Index", nIndex);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Window Station and Desktop
+HOOKDEF(HDESK, WINAPI, GetThreadDesktop, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ DWORD dwThreadId
+) {
+	HDESK ret;
+	ret = Old_GetThreadDesktop(dwThreadId);
+	LOQ_nonnull("windows", "i", "ThreadId", dwThreadId);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Window Station and Desktop
+// REVIEW: 引数 pvInfo: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(BOOL, WINAPI, GetUserObjectInformationW, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HANDLE hObj,
+	_In_ int nIndex,
+	_Out_opt_ PVOID pvInfo,
+	_In_ DWORD nLength,
+	_Out_opt_ LPDWORD lpnLengthNeeded
+) {
+	BOOL ret;
+	ret = Old_GetUserObjectInformationW(hObj, nIndex, pvInfo, nLength, lpnLengthNeeded);
+	LOQ_bool("windows", "pipiI", "Obj", hObj, "Index", nIndex, "VInfo", pvInfo, "Length", nLength, "NLengthNeeded", lpnLengthNeeded);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Multilingual User Interface (MUI)
+HOOKDEF(BOOL, WINAPI, GetUserPreferredUILanguages, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ DWORD dwFlags,
+	_Out_ PULONG pulNumLanguages,
+	_Out_opt_ PZZWSTR pwszLanguagesBuffer,
+	_Inout_ PULONG pcchLanguagesBuffer
+) {
+	BOOL ret;
+	ret = Old_GetUserPreferredUILanguages(dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
+	LOQ_bool("windows", "iIPI", "Flags", dwFlags, "UlNumLanguages", pulNumLanguages, "WszLanguagesBuffer", pwszLanguagesBuffer, "CchLanguagesBuffer", pcchLanguagesBuffer);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:System Information Functions
+// REVIEW: 戻り型 UINT の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(UINT, WINAPI, GetWindowsDirectoryA, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_Out_ LPSTR lpBuffer,
+	_In_ UINT uSize
+) {
+	UINT ret;
+	ret = Old_GetWindowsDirectoryA(lpBuffer, uSize);
+	LOQ_nonzero("windows", "si", "Buffer", lpBuffer, "USize", uSize);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Multiple Display Monitors
+// REVIEW: 戻り型 HMONITOR の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(HMONITOR, WINAPI, MonitorFromWindow, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HWND hwnd,
+	_In_ DWORD dwFlags
+) {
+	HMONITOR ret;
+	ret = Old_MonitorFromWindow(hwnd, dwFlags);
+	LOQ_nonzero("windows", "pi", "Wnd", hwnd, "Flags", dwFlags);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows GDI
+HOOKDEF(BOOL, WINAPI, OffsetRect, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_Inout_ LPRECT lprc,
+	_In_ int dx,
+	_In_ int dy
+) {
+	BOOL ret;
+	ret = Old_OffsetRect(lprc, dx, dy);
+	LOQ_bool("windows", "Pii", "Rc", lprc, "Dx", dx, "Dy", dy);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Messages and Message Queues
+HOOKDEF(BOOL, WINAPI, PeekMessageW, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_Out_ LPMSG lpMsg,
+	_In_opt_ HWND hWnd,
+	_In_ UINT wMsgFilterMin,
+	_In_ UINT wMsgFilterMax,
+	_In_ UINT wRemoveMsg
+) {
+	BOOL ret;
+	ret = Old_PeekMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
+	LOQ_bool("windows", "Ppiii", "Msg", lpMsg, "Wnd", hWnd, "WMsgFilterMin", wMsgFilterMin, "WMsgFilterMax", wMsgFilterMax, "WRemoveMsg", wRemoveMsg);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Messages and Message Queues
+HOOKDEF(VOID, WINAPI, PostQuitMessage, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ int nExitCode
+) {
+	ULONG_PTR ret = 0; (void)ret;  // void 関数: LOQ 用ダミー
+	Old_PostQuitMessage(nExitCode);
+	LOQ_void("windows", "i", "ExitCode", nExitCode);
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Painting and Drawing
+// REVIEW: 引数 lprcUpdate: 型 const RECT* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+// REVIEW: 引数 hrgnUpdate: 型 HRGN は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(BOOL, WINAPI, RedrawWindow, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HWND hWnd,
+	_In_ const RECT* lprcUpdate,
+	_In_ HRGN hrgnUpdate,
+	_In_ UINT flags
+) {
+	BOOL ret;
+	ret = Old_RedrawWindow(hWnd, lprcUpdate, hrgnUpdate, flags);
+	LOQ_bool("windows", "pppi", "Wnd", hWnd, "RcUpdate", lprcUpdate, "RgnUpdate", hrgnUpdate, "Lags", flags);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows Shell
+HOOKDEF(HRESULT, WINAPI, SHGetDesktopFolder, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_Out_ PVOID** ppshf
+) {
+	HRESULT ret;
+	ret = Old_SHGetDesktopFolder(ppshf);
+	LOQ_hresult("windows", "P", "Pshf", ppshf);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows Shell
+HOOKDEF(HRESULT, WINAPI, SHGetSpecialFolderLocation, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HWND hwndOwner,
+	_In_ int nFolder,
+	_Out_ PVOID* ppidl
+) {
+	HRESULT ret;
+	ret = Old_SHGetSpecialFolderLocation(hwndOwner, nFolder, ppidl);
+	LOQ_hresult("windows", "piP", "WndOwner", hwndOwner, "Folder", nFolder, "Pidl", ppidl);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Windows Shell
+HOOKDEF(BOOL, WINAPI, SHGetSpecialFolderPathA, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	HWND hwndOwner,
+	_Out_ LPSTR lpszPath,
+	_In_ int csidl,
+	_In_ BOOL fCreate
+) {
+	BOOL ret;
+	ret = Old_SHGetSpecialFolderPathA(hwndOwner, lpszPath, csidl, fCreate);
+	LOQ_bool("windows", "pfii", "WndOwner", hwndOwner, "SzPath", lpszPath, "Csidl", csidl, "Create", fCreate);
+	return ret;
+}
+
+// -> hook_window.c に追加 | category="windows" | winapi:Keyboard Input
+// REVIEW: 引数 lpMsg: 型 const MSG* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(BOOL, WINAPI, TranslateMessage, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ const MSG* lpMsg
+) {
+	BOOL ret;
+	ret = Old_TranslateMessage(lpMsg);
+	LOQ_bool("windows", "p", "Msg", lpMsg);
+	return ret;
+}

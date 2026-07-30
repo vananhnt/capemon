@@ -1926,3 +1926,76 @@ HOOKDEF(DWORD, WINAPI, RmStartSession,
 
 	return ret;
 }
+
+/* ==== complete_hooks.py generated batch (all-free) ==== */
+
+// -> hook_file.c に追加 | category="filesystem" | winapi:Files and I/O (Local file system)
+HOOKDEF(BOOL, WINAPI, AreFileApisANSI, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	void
+) {
+	BOOL ret;
+	ret = Old_AreFileApisANSI();
+	LOQ_bool("filesystem", "");
+	return ret;
+}
+
+// -> hook_file.c に追加 | category="filesystem" | winapi:Time
+// REVIEW: 引数 lpFileTime: 型 const FILETIME* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(BOOL, WINAPI, FileTimeToLocalFileTime, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ const FILETIME* lpFileTime,
+	_Out_ LPFILETIME lpLocalFileTime
+) {
+	BOOL ret;
+	ret = Old_FileTimeToLocalFileTime(lpFileTime, lpLocalFileTime);
+	LOQ_bool("filesystem", "pP", "FileTime", lpFileTime, "LocalFileTime", lpLocalFileTime);
+	return ret;
+}
+
+// -> hook_file.c に追加 | category="filesystem" | winapi:Time
+// REVIEW: 引数 lpFileTime: 型 const FILETIME* は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(BOOL, WINAPI, FileTimeToSystemTime, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ const FILETIME* lpFileTime,
+	_Out_ LPSYSTEMTIME lpSystemTime
+) {
+	BOOL ret;
+	ret = Old_FileTimeToSystemTime(lpFileTime, lpSystemTime);
+	LOQ_bool("filesystem", "pP", "FileTime", lpFileTime, "SystemTime", lpSystemTime);
+	return ret;
+}
+
+// -> hook_file.c に追加 | category="filesystem" | winapi:Files and I/O (Local file system)
+// REVIEW: 引数 FileInformationClass: 型 FILE_INFO_BY_HANDLE_CLASS を i(int32)で仮記録。要確認
+// REVIEW: 引数 lpFileInformation: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(BOOL, WINAPI, GetFileInformationByHandleEx, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HANDLE hFile,
+	_In_ FILE_INFO_BY_HANDLE_CLASS FileInformationClass,
+	_Out_ LPVOID lpFileInformation,
+	_In_ DWORD dwBufferSize
+) {
+	BOOL ret;
+	ret = Old_GetFileInformationByHandleEx(hFile, FileInformationClass, lpFileInformation, dwBufferSize);
+	LOQ_bool("filesystem", "pipi", "File", hFile, "FileInformationClass", FileInformationClass, "FileInformation", lpFileInformation, "BufferSize", dwBufferSize);
+	return ret;
+}
+
+// -> hook_file.c に追加 | category="filesystem" | winapi:Files and I/O (Local file system)
+HOOKDEF(LPSTR, WINAPI, PathCombineA, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_Out_ LPSTR pszPathOut,
+	_In_opt_ LPCSTR pszPathIn,
+	_In_ LPCSTR pszMore
+) {
+	LPSTR ret;
+	ret = Old_PathCombineA(pszPathOut, pszPathIn, pszMore);
+	LOQ_nonnull("filesystem", "ffs", "SzPathOut", pszPathOut, "SzPathIn", pszPathIn, "SzMore", pszMore);
+	return ret;
+}
+
+// -> hook_file.c に追加 | category="filesystem" | winapi:Files and I/O (Local file system)
+HOOKDEF(BOOL, WINAPI, SetEndOfFile, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HANDLE hFile
+) {
+	BOOL ret;
+	ret = Old_SetEndOfFile(hFile);
+	LOQ_bool("filesystem", "p", "File", hFile);
+	return ret;
+}

@@ -1080,3 +1080,63 @@ HOOKDEF(HRESULT, WINAPI, MkParseDisplayNameEx,
 	LOQ_hresult("network", "u", "Name", szName);
 	return ret;
 }
+
+/* ==== complete_hooks.py generated batch (all-free) ==== */
+
+// -> hook_network.c に追加 | category="network" | winapi:Authentication
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpRemoteName: 型 LPTSTR は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(DWORD, WINAPI, NPFormatNetworkName, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ LPTSTR lpRemoteName,
+	_Out_ LPTSTR lpFormattedName,
+	_Inout_ LPDWORD lpnLength,
+	_In_ DWORD dwFlags,
+	_In_ DWORD dwAveCharPerLine
+) {
+	DWORD ret;
+	ret = Old_NPFormatNetworkName(lpRemoteName, lpFormattedName, lpnLength, dwFlags, dwAveCharPerLine);
+	LOQ_nonzero("network", "pPIii", "RemoteName", lpRemoteName, "FormattedName", lpFormattedName, "NLength", lpnLength, "Flags", dwFlags, "AveCharPerLine", dwAveCharPerLine);
+	return ret;
+}
+
+// -> hook_network.c に追加 | category="network" | winapi:Windows Networking (WNet)
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+HOOKDEF(DWORD, WINAPI, WNetCloseEnum, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HANDLE hEnum
+) {
+	DWORD ret;
+	ret = Old_WNetCloseEnum(hEnum);
+	LOQ_nonzero("network", "p", "Enum", hEnum);
+	return ret;
+}
+
+// -> hook_network.c に追加 | category="network" | winapi:Windows Networking (WNet)
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpBuffer: 生バッファ(void*)。アドレスのみ記録。長さ引数と対にして 'b'(size_t,buf)/'S'(int,buf) 指定にすれば内容を人間可読で記録できる
+HOOKDEF(DWORD, WINAPI, WNetEnumResourceW, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ HANDLE hEnum,
+	_Inout_ LPDWORD lpcCount,
+	_Out_ LPVOID lpBuffer,
+	_Inout_ LPDWORD lpBufferSize
+) {
+	DWORD ret;
+	ret = Old_WNetEnumResourceW(hEnum, lpcCount, lpBuffer, lpBufferSize);
+	LOQ_nonzero("network", "pIpI", "Enum", hEnum, "CCount", lpcCount, "Buffer", lpBuffer, "BufferSize", lpBufferSize);
+	return ret;
+}
+
+// -> hook_network.c に追加 | category="network" | winapi:Windows Networking (WNet)
+// REVIEW: 戻り型 DWORD の成功判定が曖昧 -> LOQ_nonzero を仮採用。0=成功のAPIなら LOQ_zero 等へ変更
+// REVIEW: 引数 lpNetResource: 型 LPNETRESOURCE は自動解釈不可(構造体等)。アドレスのみ記録。内容が重要なら該当メンバを手動でログ
+HOOKDEF(DWORD, WINAPI, WNetOpenEnumW, // 呼出規約は WINAPI 仮定(socket/native/CRT系は要確認)
+	_In_ DWORD dwScope,
+	_In_ DWORD dwType,
+	_In_ DWORD dwUsage,
+	_In_ LPNETRESOURCE lpNetResource,
+	_Out_ LPHANDLE lphEnum
+) {
+	DWORD ret;
+	ret = Old_WNetOpenEnumW(dwScope, dwType, dwUsage, lpNetResource, lphEnum);
+	LOQ_nonzero("network", "iiipP", "Scope", dwScope, "Type", dwType, "Usage", dwUsage, "NetResource", lpNetResource, "HEnum", lphEnum);
+	return ret;
+}
