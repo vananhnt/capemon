@@ -298,9 +298,8 @@ HOOKDEF(BOOL, WINAPI, CryptDuplicateKey,
 	_Out_	HCRYPTKEY* phKey
 ) {
 	BOOL ret = Old_CryptDuplicateKey(hKey, pdwReserved, dwFlags, phKey);
-	if (ret) {
+	if (ret)
 		LOQ_bool("crypto", "pph", "OldCryptKey", hKey, "NewCryptKey", *phKey, "Flags", dwFlags);
-	}
 	return ret;
 }
 
@@ -462,7 +461,7 @@ HOOKDEF(BOOL, WINAPI, CryptImportKey,
 	HCRYPTKEY  *phKey
 ) {
 	BOOL ret = Old_CryptImportKey(hProv, pbData, dwDataLen, hPubKey, dwFlags, phKey);
-	LOQ_bool("crypto", "bhpi", "KeyBlob", dwDataLen, pbData, "Flags", dwFlags,  "CryptKey", *phKey, "Length", dwDataLen);
+	LOQ_bool("crypto", "bhpi", "KeyBlob", dwDataLen, pbData, "Flags", dwFlags,  "CryptKey", phKey ? *phKey : 0, "Length", dwDataLen);
 	return ret;
 }
 
@@ -477,7 +476,7 @@ HOOKDEF(SECURITY_STATUS, WINAPI, NCryptImportKey,
 	DWORD			  dwFlags
 ) {
 	BOOL ret = Old_NCryptImportKey(hProvider, hImportKey, pszBlobType, pParameterList, phKey, pbData, cbData, dwFlags);
-	LOQ_bool("crypto", "bhp", "KeyBlob", cbData, pbData, "Flags", dwFlags,  "CryptKey", *phKey, "Length", cbData);
+	LOQ_bool("crypto", "bhp", "KeyBlob", cbData, pbData, "Flags", dwFlags,  "CryptKey", phKey ? *phKey : 0, "Length", cbData);
 	return ret;
 }
 
@@ -542,7 +541,7 @@ HOOKDEF(NTSTATUS, WINAPI, BCryptImportKey,
 	ULONG				dwFlags
 ) {
 	NTSTATUS ret = Old_BCryptImportKey(hAlgorithm, hImportKey, pszBlobType, phKey, pbKeyObject, cbKeyObject, pbInput, cbInput, dwFlags);
-	LOQ_ntstatus("crypto", "bhpi", "KeyBlob", cbInput, pbInput, "Flags", dwFlags, "CryptKey", *phKey, "Length", cbInput);
+	LOQ_ntstatus("crypto", "bhpi", "KeyBlob", cbInput, pbInput, "Flags", dwFlags, "CryptKey", phKey ? *phKey : 0, "Length", cbInput);
 	return ret;
 }
 
@@ -562,7 +561,7 @@ HOOKDEF(NTSTATUS, WINAPI, BCryptImportKeyPair,
 		DebugOutput("BCryptImportKeyPair hook: Dumped ImportKey buffer at 0x%p (size 0x%x).\n", pbInput, cbInput);
 	}
 	NTSTATUS ret = Old_BCryptImportKeyPair(hAlgorithm, hImportKey, pszBlobType, phKey, pbInput, cbInput, dwFlags);
-	LOQ_ntstatus("crypto", "bhpi", "KeyBlob", cbInput, pbInput, "Flags", dwFlags, "CryptKey", *phKey, "Length", cbInput);
+	LOQ_ntstatus("crypto", "bhpi", "KeyBlob", cbInput, pbInput, "Flags", dwFlags, "CryptKey", phKey ? *phKey : 0, "Length", cbInput);
 	return ret;
 }
 
@@ -616,5 +615,166 @@ HOOKDEF(NTSTATUS, WINAPI, BCryptEncrypt,
 	}
 	NTSTATUS ret = Old_BCryptEncrypt(hKey, pbInput, cbInput, pPaddingInfo, pbIV, cbIV, pbOutput, cbOutput, pcbResult, dwFlags);
 	LOQ_ntstatus("crypto", "bbhpi", "Input", cbInput, pbInput, "IV", cbIV, pbIV, "Flags", dwFlags, "CryptKey", hKey, "Length", cbInput);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, CryptSignMessage,
+	_In_ PCRYPT_SIGN_MESSAGE_PARA pSignPara,
+	_In_ BOOL fDetachedSignature,
+	_In_ DWORD cToBeSigned,
+	_In_ const BYTE *rgpbToBeSigned[],
+	_In_ DWORD rgcbToBeSigned[],
+	_Out_ BYTE *pbSignedBlob,
+	_Inout_ DWORD *pcbSignedBlob
+) {
+	BOOL ret = Old_CryptSignMessage(pSignPara, fDetachedSignature, cToBeSigned, rgpbToBeSigned, rgcbToBeSigned, pbSignedBlob, pcbSignedBlob);
+	LOQ_bool("crypto", "b", "SignedBlob", pcbSignedBlob ? *pcbSignedBlob : 0, pbSignedBlob);
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, CryptVerifyMessageSignature,
+	_In_ PCRYPT_VERIFY_MESSAGE_PARA pVerifyPara,
+	_In_ DWORD dwSignerIndex,
+	_In_ const BYTE *pbDecoded,
+	_In_ DWORD cbDecoded,
+	_Out_opt_ BYTE *pbDecodedMsg,
+	_Inout_opt_ DWORD *pcbDecodedMsg,
+	_Out_opt_ PCCERT_CONTEXT *ppSignerCert
+) {
+	BOOL ret = Old_CryptVerifyMessageSignature(pVerifyPara, dwSignerIndex, pbDecoded, cbDecoded, pbDecodedMsg, pcbDecodedMsg, ppSignerCert);
+	LOQ_bool("crypto", "b", "DecodedMsg", pcbDecodedMsg ? *pcbDecodedMsg : 0, pbDecodedMsg);
+	return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, BCryptCreateHash,
+	BCRYPT_ALG_HANDLE hAlgorithm,
+	BCRYPT_HASH_HANDLE *phHash,
+	PUCHAR pbHashObject,
+	ULONG cbHashObject,
+	PUCHAR pbSecret,
+	ULONG cbSecret,
+	ULONG dwFlags
+) {
+	NTSTATUS ret = Old_BCryptCreateHash(hAlgorithm, phHash, pbHashObject, cbHashObject, pbSecret, cbSecret, dwFlags);
+	LOQ_ntstatus("crypto", "p", "HashHandle", *phHash);
+	return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, BCryptDestroyHash,
+	BCRYPT_HASH_HANDLE hHash
+) {
+	NTSTATUS ret = Old_BCryptDestroyHash(hHash);
+	LOQ_ntstatus("crypto", "p", "HashHandle", hHash);
+	return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, BCryptGenRandom,
+	BCRYPT_ALG_HANDLE hAlgorithm,
+	PUCHAR pbBuffer,
+	ULONG cbBuffer,
+	ULONG dwFlags
+) {
+	NTSTATUS ret = Old_BCryptGenRandom(hAlgorithm, pbBuffer, cbBuffer, dwFlags);
+	LOQ_ntstatus("crypto", "b", "Buffer", cbBuffer, pbBuffer);
+	return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, BCryptOpenAlgorithmProvider,
+	BCRYPT_ALG_HANDLE *phAlgorithm,
+	LPCWSTR pszAlgId,
+	LPCWSTR pszImplementation,
+	ULONG dwFlags
+) {
+	NTSTATUS ret = Old_BCryptOpenAlgorithmProvider(phAlgorithm, pszAlgId, pszImplementation, dwFlags);
+	LOQ_ntstatus("crypto", "uu", "AlgId", pszAlgId, "Implementation", pszImplementation);
+	return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, BCryptCloseAlgorithmProvider,
+	BCRYPT_ALG_HANDLE hAlgorithm,
+	ULONG dwFlags
+) {
+	NTSTATUS ret = Old_BCryptCloseAlgorithmProvider(hAlgorithm, dwFlags);
+	LOQ_ntstatus("crypto", "p", "Algorithm", hAlgorithm);
+	return ret;
+}
+
+// NCrypt key management
+HOOKDEF(SECURITY_STATUS, WINAPI, NCryptCreatePersistedKey,
+	NCRYPT_PROV_HANDLE hProvider,
+	NCRYPT_KEY_HANDLE *phKey,
+	LPCWSTR pszAlgId,
+	LPCWSTR pszKeyName,
+	DWORD dwLegacyKeySpec,
+	DWORD dwFlags
+) {
+	SECURITY_STATUS ret = Old_NCryptCreatePersistedKey(hProvider, phKey, pszAlgId, pszKeyName, dwLegacyKeySpec, dwFlags);
+	LOQ_ntstatus("crypto", "uup", "AlgId", pszAlgId, "KeyName", pszKeyName, "KeyHandle", *phKey);
+	return ret;
+}
+
+HOOKDEF(SECURITY_STATUS, WINAPI, NCryptFinalizeKey,
+	NCRYPT_KEY_HANDLE hKey,
+	DWORD dwFlags
+) {
+	SECURITY_STATUS ret = Old_NCryptFinalizeKey(hKey, dwFlags);
+	LOQ_ntstatus("crypto", "p", "KeyHandle", hKey);
+	return ret;
+}
+
+HOOKDEF(SECURITY_STATUS, WINAPI, NCryptOpenKey,
+	NCRYPT_PROV_HANDLE hProvider,
+	NCRYPT_KEY_HANDLE *phKey,
+	LPCWSTR pszKeyName,
+	DWORD dwLegacyKeySpec,
+	DWORD dwFlags
+) {
+	SECURITY_STATUS ret = Old_NCryptOpenKey(hProvider, phKey, pszKeyName, dwLegacyKeySpec, dwFlags);
+	LOQ_ntstatus("crypto", "up", "KeyName", pszKeyName, "KeyHandle", *phKey);
+	return ret;
+}
+
+HOOKDEF(BOOLEAN, WINAPI, SystemFunction036,
+	_Out_ PVOID RandomBuffer,
+	_In_  ULONG RandomBufferLength
+)
+{
+	BOOLEAN ret = Old_SystemFunction036(RandomBuffer, RandomBufferLength);
+
+	LOQ_bool("crypto", "pb", "RandomBuffer", RandomBuffer, "Buffer", ret ? RandomBufferLength : 0, RandomBuffer);
+
+	return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, SystemFunction040,
+	_Inout_ PVOID  Memory,
+	_In_    ULONG  MemorySize,
+	_In_    ULONG  OptionFlags
+) {
+	PVOID pre_copy = NULL;
+
+	if (Memory && MemorySize) {
+		pre_copy = malloc(MemorySize);
+		if (pre_copy)
+			memcpy(pre_copy, Memory, MemorySize);
+	}
+
+	NTSTATUS ret = Old_SystemFunction040(Memory, MemorySize, OptionFlags);
+
+	LOQ_ntstatus("crypto", "pbII", "Address", Memory, "Buffer", pre_copy ? MemorySize : 0, pre_copy, "MemorySize", MemorySize, "OptionFlags", OptionFlags);
+
+	free(pre_copy);
+	return ret;
+}
+
+HOOKDEF(NTSTATUS, WINAPI, SystemFunction041,
+	_Inout_ PVOID  Memory,
+	_In_    ULONG  MemorySize,
+	_In_    ULONG  OptionFlags
+) {
+	NTSTATUS ret = Old_SystemFunction041(Memory, MemorySize, OptionFlags);
+
+	LOQ_ntstatus("crypto", "pbII", "Address", Memory, "Buffer", NT_SUCCESS(ret) ? MemorySize : 0, Memory, "MemorySize", MemorySize, "OptionFlags", OptionFlags);
+
 	return ret;
 }

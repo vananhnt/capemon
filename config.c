@@ -1290,6 +1290,13 @@ void parse_config_line(char* line)
 			else
 				DebugOutput("Terminate processes on terminate_event disabled.\n");
 		}
+		else if (!stricmp(key, "unhook-on-terminate")) {
+			g_config.unhook_on_terminate = value[0] == '1';
+			if (g_config.unhook_on_terminate)
+				DebugOutput("Unhook monitor on terminate_event enabled.\n");
+			else
+				DebugOutput("Unhook monitor on terminate_event disabled.\n");
+		}
 		else if (!stricmp(key, "branch-trace")) {
 			g_config.branch_trace = value[0] == '1';
 			if (g_config.branch_trace)
@@ -1410,6 +1417,11 @@ void parse_config_line(char* line)
 			else
 				DebugOutput("Syscall hooks disabled.\n");
 		}
+		else if (!stricmp(key, "modulenames")) {
+			g_config.modulenames = value[0] == '1';
+			if (g_config.modulenames)
+				DebugOutput("Module names enabled in trace output\n");
+		}
 		else if (!stricmp(key, "loopskip")) {
 			g_config.loopskip = value[0] == '1';
 			if (g_config.loopskip)
@@ -1440,6 +1452,10 @@ void parse_config_line(char* line)
 			g_config.hook_watch = value[0] == '1';
 			if (g_config.hook_watch)
 				DebugOutput("Config: Hook watch enabled.\n");
+		}
+		else if (!stricmp(key, "sleep-skip-seconds")) {
+			g_config.sleep_skip_seconds = (int)strtoul(value, NULL, 10);
+			DebugOutput("Config: Sleep skip seconds set to %d.\n", g_config.sleep_skip_seconds);
 		}
 		else if (!stricmp(key, "monitor")) {
 			DWORD pid = (unsigned int)strtoul(value, NULL, 10);
@@ -1488,6 +1504,7 @@ void read_config(void)
 	g_config.loaderlock_scans = 1;
 	g_config.spoofed_cpu_count = SPOOFED_CPU_CORE_NUM;
 	g_config.syscall = 1;
+	g_config.sleep_skip_seconds = 10;
 
 	StepLimit = SINGLE_STEP_LIMIT;
 
