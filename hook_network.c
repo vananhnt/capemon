@@ -20,6 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "ntapi.h"
 #include <windns.h>
 #include <wininet.h>
+#include <iphlpapi.h>
 #include "hooking.h"
 #include "log.h"
 #include "pipe.h"

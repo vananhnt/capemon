@@ -84,7 +84,7 @@ HOOKDEF(HHOOK, WINAPI, SetWindowsHookExW,
 	HHOOK ret;
 	lasterror_t lasterror;
 
-	ret = Old_SetWindowsHookExW(idHook, lpfn, hmod, dwThreadId);
+	ret = Old_SetWindowsHookExW(idHook, lpfn, hMod, dwThreadId);
 
 	/* Samples install a WH_MOUSE_LL low-level mouse hook whose MouseProc watches
 	 * for a scroll message (wParam == WM_MOUSEWHEEL / WM_VSCROLL / WM_HSCROLL)
@@ -117,7 +117,7 @@ HOOKDEF(HHOOK, WINAPI, SetWindowsHookExW,
 	}
 
 	LOQ_nonnull("system", "ippi", "HookIdentifier", idHook, "ProcedureAddress", lpfn,
-		"ModuleAddress", hmod, "ThreadId", dwThreadId);
+		"ModuleAddress", hMod, "ThreadId", dwThreadId);
 	return ret;
 }
 

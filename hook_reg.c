@@ -349,8 +349,8 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExW,
        subkey name, and return the unmodified result verbatim. */
     LONG ret;
 
-    ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcchName, lpReserved,
-        lpClass, lpcchClass, lpftLastWriteTime);
+    ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcName, lpReserved,
+        lpClass, lpcClass, lpftLastWriteTime);
 
     LOQ_zero("registry", "iu", "Index", dwIndex, "Name",
         (ret == ERROR_SUCCESS && lpName != NULL) ? lpName : L"");
@@ -748,9 +748,9 @@ HOOKDEF(LONG, WINAPI, RegQueryInfoKeyW,
 	ULONG result_len;
 	int is_recentdocs;
 
-	ret = Old_RegQueryInfoKeyW(hKey, lpClass, lpcchClass, lpReserved,
-		lpcSubKeys, lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues,
-		lpcbMaxValueNameLen, lpcbMaxValueLen, lpcbSecurityDescriptor,
+	ret = Old_RegQueryInfoKeyW(hKey, lpClass, lpcClass, lpReserved,
+		lpcSubKeys, lpcMaxSubKeyLen, lpcMaxClassLen, lpcValues,
+		lpcMaxValueNameLen, lpcMaxValueLen, lpcbSecurityDescriptor,
 		lpftLastWriteTime);
 
 	/* Samples enumerate HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\
@@ -796,11 +796,11 @@ HOOKDEF(LONG, WINAPI, RegQueryInfoKeyW,
 		set_lasterrors(&lasterror);
 	}
 
-	LOQ_zero("registry", "pU6I", "KeyHandle", hKey, "Class", lpcchClass ? *lpcchClass : 0, lpClass,
-		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcbMaxSubKeyLen,
-		"MaxClassLength", lpcbMaxClassLen, "ValueCount", lpcValues,
-		"MaxValueNameLength", lpcbMaxValueNameLen,
-		"MaxValueLength", lpcbMaxValueLen);
+	LOQ_zero("registry", "pU6I", "KeyHandle", hKey, "Class", lpcClass ? *lpcClass : 0, lpClass,
+		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcMaxSubKeyLen,
+		"MaxClassLength", lpcMaxClassLen, "ValueCount", lpcValues,
+		"MaxValueNameLength", lpcMaxValueNameLen,
+		"MaxValueLength", lpcMaxValueLen);
 	return ret;
 }
 

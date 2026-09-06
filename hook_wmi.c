@@ -128,116 +128,20 @@ HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_Out_opt_	LONG	*plFlavor
 )
 {
-/* flat capemon alias for IEnumWbemClassObject::Next — the enumerator
-	   interface pointer is passed as the first argument (_this). */
+/* Diagnostic-only fallback: this hook binds to CWbemObject::Next, i.e.
+	   IWbemClassObject::Next (property enumeration — lFlags, strName, pVal,
+	   pType, plFlavor), but the generated countermeasure was written against
+	   IEnumWbemClassObject::Next (object enumeration — lTimeout, uCount,
+	   ppOutParams, puReturned), a different interface whose parameters do not
+	   exist in this signature. Applying that object-enumeration logic here would
+	   misinterpret the arguments at runtime, so no transparency logic is applied:
+	   call the original with the real property-enumeration arguments and return
+	   the unmodified result verbatim. */
 	HRESULT ret;
-	lasterror_t lasterror;
-	static PVOID emitted_enums[64];
-	static unsigned int emitted_count;
-	unsigned int i;
-	int already_emitted;
-	ULONG got;
-	IWbemClassObject *obj;
-	VARIANT v;
 
-	ret = Old_WMI_Next(_this, lTimeout, uCount, ppOutParams, puReturned);
+	ret = Old_WMI_Next(_this, lFlags, strName, pVal, pType, plFlavor);
 
-	/* Samples enumerate registered AV products by running
-	 * "SELECT * FROM AntiVirusProduct" against ROOT\SecurityCenter2 and then
-	 * walk the returned IEnumWbemClassObject with ::Next, reading each object's
-	 * 'displayName'/'productState' with ::Get and counting the surviving
-	 * instances (avProductCount); a count < 1 (an empty or immediately-EOF
-	 * enumerator) is read as a freshly-imaged analysis VM with no real security
-	 * product, so checkCondition() takes its sandbox-detected branch. The
-	 * companion WMI_ExecQuery hook guarantees a walkable, non-empty enumerator
-	 * and WMI_Get forces any 'displayName' read to a whitelisted vendor, but the
-	 * ::Next loop must hand the caller exactly one row so avProductCount settles
-	 * at 1 rather than fluctuating with however many objects the substituted
-	 * enumerator happens to hold. On the first ::Next for a given enumerator,
-	 * stamp the leading returned object so it reads as a genuine AntiVirusProduct
-	 * instance (displayName="Windows Defender", productState=0x61000,
-	 * pathToSignedProductExe="windowsdefender://"), clamp the batch to that single
-	 * object (releasing any extras so ownership stays correct), report
-	 * *puReturned=1 with WBEM_S_NO_ERROR, and remember the enumerator. On every
-	 * later ::Next for that same enumerator, release whatever the real call
-	 * returned and report WBEM_S_FALSE with *puReturned=0, ending the walk
-	 * cleanly. avProductCount therefore becomes exactly 1 and the sample sees a
-	 * real user machine. lasterror is preserved around the forged response. */
-	if (!g_config.no_stealth && ppOutParams != NULL && puReturned != NULL &&
-			uCount >= 1) {
-		get_lasterrors(&lasterror);
-
-		already_emitted = 0;
-		for (i = 0; i < emitted_count; i++) {
-			if (emitted_enums[i] == _this) {
-				already_emitted = 1;
-				break;
-			}
-		}
-
-		got = SUCCEEDED(ret) ? *puReturned : 0;
-
-		if (!already_emitted && SUCCEEDED(ret) && got >= 1 &&
-				ppOutParams[0] != NULL) {
-			/* first row from this enumerator: stamp it so it reads as a
-			   registered AntiVirusProduct instance */
-			obj = ppOutParams[0];
-
-			VariantInit(&v);
-			v.vt = VT_BSTR;
-			v.bstrVal = SysAllocString(L"Windows Defender");
-			if (v.bstrVal != NULL) {
-				obj->lpVtbl->Put(obj, L"displayName", 0, &v, 0);
-				SysFreeString(v.bstrVal);
-			}
-
-			VariantInit(&v);
-			v.vt = VT_I4;
-			v.lVal = 0x61000;
-			obj->lpVtbl->Put(obj, L"productState", 0, &v, 0);
-
-			VariantInit(&v);
-			v.vt = VT_BSTR;
-			v.bstrVal = SysAllocString(L"windowsdefender://");
-			if (v.bstrVal != NULL) {
-				obj->lpVtbl->Put(obj, L"pathToSignedProductExe", 0, &v, 0);
-				SysFreeString(v.bstrVal);
-			}
-
-			/* clamp the batch to exactly one object so avProductCount == 1;
-			   release the extras the real call handed back */
-			for (i = 1; i < got; i++) {
-				if (ppOutParams[i] != NULL) {
-					ppOutParams[i]->lpVtbl->Release(ppOutParams[i]);
-					ppOutParams[i] = NULL;
-				}
-			}
-
-			*puReturned = 1;
-			ret = WBEM_S_NO_ERROR;
-			lasterror.Win32Error = ERROR_SUCCESS;
-
-			if (emitted_count < sizeof(emitted_enums) / sizeof(emitted_enums[0]))
-				emitted_enums[emitted_count++] = _this;
-		} else if (already_emitted) {
-			/* subsequent ::Next on this enumerator: discard whatever the real
-			   call returned and report end-of-enumeration */
-			for (i = 0; i < got; i++) {
-				if (ppOutParams[i] != NULL) {
-					ppOutParams[i]->lpVtbl->Release(ppOutParams[i]);
-					ppOutParams[i] = NULL;
-				}
-			}
-
-			*puReturned = 0;
-			ret = WBEM_S_FALSE;
-		}
-
-		set_lasterrors(&lasterror);
-	}
-
-	LOQ_hresult("system", "ii", "Count", (int)uCount,
-		"Returned", puReturned != NULL ? (int)*puReturned : 0);
+	LOQ_hresult("system", "i", "Flags", (int)lFlags);
 	return ret;
 }
 
