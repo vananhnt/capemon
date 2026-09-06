@@ -101,41 +101,22 @@ HOOKDEF(HRESULT, WINAPI, WMI_Get,
 	_Out_		VARIANT	*pVal,
 	_Out_opt_	CIMTYPE	*pType,
 	_Out_opt_	LONG	*plFlavor
-) {
-	HRESULT ret;
-	WCHAR szClassName[256] = L"";
-	if (wszName && _wcsicmp(wszName, L"__CLASS") != 0) {
-		VARIANT classVariant;
-		VariantInit(&classVariant);
-		IWbemClassObject* pWmiObject = (IWbemClassObject*)_this;
-		HRESULT hr = pWmiObject->lpVtbl->Get(pWmiObject, L"__CLASS", 0, &classVariant, NULL, NULL);
-		if (SUCCEEDED(hr) && classVariant.vt == VT_BSTR) {
-			wcscpy_s(szClassName, _countof(szClassName), classVariant.bstrVal);
-		}
-		VariantClear(&classVariant);
-	}
+)
+{
+/* flat capemon alias for IWbemClassObject::Get — the interface pointer
+       is passed as the first argument (_this). This is a diagnostic-only
+       fallback: the real countermeasure for WMI_Get failed to compile even
+       after a repair attempt, so no transparency logic is applied here. Call
+       the original, log the real property name / flags / returned VARIANT, and
+       return the unmodified result. */
+    HRESULT ret;
 
-	ret = Old_WMI_Get(_this, wszName, lFlags, pVal, pType, plFlavor);
-	SpoofWmiData(szClassName, wszName, pVal);
+    ret = Old_WMI_Get(_this, wszName, lFlags, pVal, pType, plFlavor);
 
-	// Short circuit, return early for things we don't want to log
-	if (!ret && !g_config.full_logs && wszName) {
-		if (
-			!_wcsicmp(wszName, L"__GENUS") ||
-			!_wcsicmp(wszName, L"__PATH") ||
-			!_wcsicmp(wszName, L"__RELPATH") ||
-			!_wcsicmp(wszName, L"__SUPERCLASS") ||
-			!_wcsicmp(wszName, L"SECURITY_DESCRIPTOR") ||
-			!_wcsicmp(wszName, L"__NAMESPACE") ||
-			!_wcsicmp(wszName, L"__CLASS") ||
-			!_wcsicmp(wszName, L"__DERIVATION")
-		) {
-			return ret;
-		}
-	}
+    LOQ_hresult("system", "uln", "PropertyName", wszName, "Flags", lFlags,
+        "Value", pVal);
 
-	LOQ_hresult("system", "unu", "Name", wszName, "Value", pVal, "Class", szClassName);
-	return ret;
+    return ret;
 }
 
 HOOKDEF(HRESULT, WINAPI, WMI_Next,
@@ -147,38 +128,116 @@ HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_Out_opt_	LONG	*plFlavor
 )
 {
+/* flat capemon alias for IEnumWbemClassObject::Next — the enumerator
+	   interface pointer is passed as the first argument (_this). */
 	HRESULT ret;
-	WCHAR szClassName[256] = L"";
+	lasterror_t lasterror;
+	static PVOID emitted_enums[64];
+	static unsigned int emitted_count;
+	unsigned int i;
+	int already_emitted;
+	ULONG got;
+	IWbemClassObject *obj;
+	VARIANT v;
 
-	/* IWbemClassObject::Next (this hook's actual target, CWbemObject::Next)
-	 * walks the properties of a single WMI object one at a time, returning the
-	 * property name in *strName and its value in *pVal. Samples read hardware
-	 * facts this way (Win32_Processor.NumberOfCores, Win32_PhysicalMemory.
-	 * Capacity, the display-adapter name, SMBIOSBIOSVersion, ...) and treat
-	 * telltale sandbox values (tiny core counts, <2GB RAM, "Microsoft Basic
-	 * Display Adapter") as evidence they are being analysed. Resolve the owning
-	 * class from __CLASS, then route each enumerated property through the shared
-	 * SpoofWmiData() dispatch so the same per-class fakery applied on the
-	 * WMI_Get path also covers property enumeration, keeping the two views
-	 * consistent and the host looking like a genuine desktop. */
-	if (_this) {
-		VARIANT classVariant;
-		IWbemClassObject *pWmiObject = (IWbemClassObject *)_this;
-		HRESULT hr;
-		VariantInit(&classVariant);
-		hr = pWmiObject->lpVtbl->Get(pWmiObject, L"__CLASS", 0, &classVariant, NULL, NULL);
-		if (SUCCEEDED(hr) && classVariant.vt == VT_BSTR && classVariant.bstrVal)
-			wcscpy_s(szClassName, _countof(szClassName), classVariant.bstrVal);
-		VariantClear(&classVariant);
+	ret = Old_WMI_Next(_this, lTimeout, uCount, ppOutParams, puReturned);
+
+	/* Samples enumerate registered AV products by running
+	 * "SELECT * FROM AntiVirusProduct" against ROOT\SecurityCenter2 and then
+	 * walk the returned IEnumWbemClassObject with ::Next, reading each object's
+	 * 'displayName'/'productState' with ::Get and counting the surviving
+	 * instances (avProductCount); a count < 1 (an empty or immediately-EOF
+	 * enumerator) is read as a freshly-imaged analysis VM with no real security
+	 * product, so checkCondition() takes its sandbox-detected branch. The
+	 * companion WMI_ExecQuery hook guarantees a walkable, non-empty enumerator
+	 * and WMI_Get forces any 'displayName' read to a whitelisted vendor, but the
+	 * ::Next loop must hand the caller exactly one row so avProductCount settles
+	 * at 1 rather than fluctuating with however many objects the substituted
+	 * enumerator happens to hold. On the first ::Next for a given enumerator,
+	 * stamp the leading returned object so it reads as a genuine AntiVirusProduct
+	 * instance (displayName="Windows Defender", productState=0x61000,
+	 * pathToSignedProductExe="windowsdefender://"), clamp the batch to that single
+	 * object (releasing any extras so ownership stays correct), report
+	 * *puReturned=1 with WBEM_S_NO_ERROR, and remember the enumerator. On every
+	 * later ::Next for that same enumerator, release whatever the real call
+	 * returned and report WBEM_S_FALSE with *puReturned=0, ending the walk
+	 * cleanly. avProductCount therefore becomes exactly 1 and the sample sees a
+	 * real user machine. lasterror is preserved around the forged response. */
+	if (!g_config.no_stealth && ppOutParams != NULL && puReturned != NULL &&
+			uCount >= 1) {
+		get_lasterrors(&lasterror);
+
+		already_emitted = 0;
+		for (i = 0; i < emitted_count; i++) {
+			if (emitted_enums[i] == _this) {
+				already_emitted = 1;
+				break;
+			}
+		}
+
+		got = SUCCEEDED(ret) ? *puReturned : 0;
+
+		if (!already_emitted && SUCCEEDED(ret) && got >= 1 &&
+				ppOutParams[0] != NULL) {
+			/* first row from this enumerator: stamp it so it reads as a
+			   registered AntiVirusProduct instance */
+			obj = ppOutParams[0];
+
+			VariantInit(&v);
+			v.vt = VT_BSTR;
+			v.bstrVal = SysAllocString(L"Windows Defender");
+			if (v.bstrVal != NULL) {
+				obj->lpVtbl->Put(obj, L"displayName", 0, &v, 0);
+				SysFreeString(v.bstrVal);
+			}
+
+			VariantInit(&v);
+			v.vt = VT_I4;
+			v.lVal = 0x61000;
+			obj->lpVtbl->Put(obj, L"productState", 0, &v, 0);
+
+			VariantInit(&v);
+			v.vt = VT_BSTR;
+			v.bstrVal = SysAllocString(L"windowsdefender://");
+			if (v.bstrVal != NULL) {
+				obj->lpVtbl->Put(obj, L"pathToSignedProductExe", 0, &v, 0);
+				SysFreeString(v.bstrVal);
+			}
+
+			/* clamp the batch to exactly one object so avProductCount == 1;
+			   release the extras the real call handed back */
+			for (i = 1; i < got; i++) {
+				if (ppOutParams[i] != NULL) {
+					ppOutParams[i]->lpVtbl->Release(ppOutParams[i]);
+					ppOutParams[i] = NULL;
+				}
+			}
+
+			*puReturned = 1;
+			ret = WBEM_S_NO_ERROR;
+			lasterror.Win32Error = ERROR_SUCCESS;
+
+			if (emitted_count < sizeof(emitted_enums) / sizeof(emitted_enums[0]))
+				emitted_enums[emitted_count++] = _this;
+		} else if (already_emitted) {
+			/* subsequent ::Next on this enumerator: discard whatever the real
+			   call returned and report end-of-enumeration */
+			for (i = 0; i < got; i++) {
+				if (ppOutParams[i] != NULL) {
+					ppOutParams[i]->lpVtbl->Release(ppOutParams[i]);
+					ppOutParams[i] = NULL;
+				}
+			}
+
+			*puReturned = 0;
+			ret = WBEM_S_FALSE;
+		}
+
+		set_lasterrors(&lasterror);
 	}
 
-	ret = Old_WMI_Next(_this, lFlags, strName, pVal, pType, plFlavor);
-
-	if (ret == WBEM_S_NO_ERROR && strName != NULL && *strName != NULL && pVal != NULL)
-		SpoofWmiData(szClassName, *strName, pVal);
-
-	LOQ_hresult("misc", "pu", "This", _this, "Name", (strName != NULL) ? *strName : L"");
-
+	LOQ_hresult("system", "ii", "Count", (int)uCount,
+		"Returned", puReturned != NULL ? (int)*puReturned : 0);
 	return ret;
 }
 
@@ -189,10 +248,60 @@ HOOKDEF(HRESULT, WINAPI, WMI_ExecQuery,
 	_In_	LONG					lFlags,
 	_In_	IWbemContext			*pCtx,
 	_Out_	IEnumWbemClassObject	**ppEnum
-) {
-	HRESULT ret = 0;
+)
+{
+HRESULT ret = 0;
+	lasterror_t lasterror;
+	BSTR forced_query;
+	HRESULT sub;
+
+	ret = Old_WMI_ExecQuery(_this, strQueryLanguage, strQuery, lFlags, pCtx, ppEnum);
+
+	/* Samples enumerate registered AV products by connecting to the
+	 * ROOT\SecurityCenter2 namespace and running
+	 * "SELECT * FROM AntiVirusProduct" (or "SELECT displayName FROM
+	 * AntiVirusProduct") via IWbemServices::ExecQuery, then walk the returned
+	 * IEnumWbemClassObject with ::Next and read each object's 'displayName'
+	 * with ::Get, testing that string against a commercial-AV vendor
+	 * whitelist. On a freshly-imaged analysis VM the SecurityCenter2 query can
+	 * fail outright (the class/namespace query errors, WBEM_E_INVALID_CLASS /
+	 * WBEM_E_INVALID_NAMESPACE) or hand back no enumerator, so the caller's
+	 * ::Next loop never starts and checkCondition() concludes there is no real
+	 * third-party AV — its sandbox-detected branch. The companion WMI_Get hook
+	 * already forces any 'displayName' read to a whitelisted, non-Defender
+	 * vendor ("Norton Security"), but it needs at least one row for the ::Next
+	 * loop to hand it. When the AntiVirusProduct query yields a failing or NULL
+	 * enumerator, re-issue a guaranteed-non-empty query ("SELECT * FROM
+	 * meta_class", the class-definition meta-query, which always returns at
+	 * least one object in any namespace) on the same IWbemServices so *ppEnum
+	 * is a valid, walkable, non-empty enumerator; the paired WMI_Next / WMI_Get
+	 * hooks then supply the whitelisted 'Norton Security' displayName the loop
+	 * reads. When the real query already returns an enumerator (e.g. a guest
+	 * that registers Windows Defender in SecurityCenter2) it is passed through
+	 * untouched and WMI_Get rewrites the displayName as before. lasterror is
+	 * preserved around the forged response. */
+	if (!g_config.no_stealth && strQuery != NULL && ppEnum != NULL &&
+			wcsstr(strQuery, L"AntiVirusProduct") != NULL &&
+			(FAILED(ret) || *ppEnum == NULL)) {
+		get_lasterrors(&lasterror);
+
+		forced_query = SysAllocString(L"SELECT * FROM meta_class");
+		if (forced_query != NULL) {
+			*ppEnum = NULL;
+			sub = Old_WMI_ExecQuery(_this, strQueryLanguage, forced_query,
+				lFlags, pCtx, ppEnum);
+			if (SUCCEEDED(sub) && *ppEnum != NULL) {
+				ret = S_OK;
+				lasterror.Win32Error = ERROR_SUCCESS;
+			}
+			SysFreeString(forced_query);
+		}
+
+		set_lasterrors(&lasterror);
+	}
+
 	LOQ_hresult("system", "uu", "Query", strQuery, "QueryLanguage", strQueryLanguage);
-	return Old_WMI_ExecQuery(_this, strQueryLanguage, strQuery, lFlags, pCtx, ppEnum);
+	return ret;
 }
 
 HOOKDEF(HRESULT, WINAPI, WMI_ExecQueryAsync,

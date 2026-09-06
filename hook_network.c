@@ -695,6 +695,11 @@ HOOKDEF(BOOL, WINAPI, HttpQueryInfoA,
 	#define MIRAGE_HTTP_QUERY_REQUEST_METHOD   45
 	#define MIRAGE_HTTP_QUERY_FLAG_NUMBER      0x20000000
 	#define MIRAGE_HTTP_QUERY_FLAG_SYSTEMTIME  0x40000000
+	/* set when the caller is reading a header it *sent* (a request header)
+	   rather than a response header; the external network clock only lives in
+	   the response, so request-header reads must pass through untouched. This
+	   flag sits above MIRAGE_HTTP_QUERY_ID_MASK, so exclude it explicitly. */
+	#define MIRAGE_HTTP_QUERY_FLAG_REQUEST_HEADERS 0x80000000
 	BOOL ret;
 	lasterror_t lasterror;
 	DWORD level;
@@ -735,6 +740,7 @@ HOOKDEF(BOOL, WINAPI, HttpQueryInfoA,
 	 * Date header line for the raw-headers forms. lasterror is preserved. */
 	level = dwInfoLevel & MIRAGE_HTTP_QUERY_ID_MASK;
 	if (!g_config.no_stealth && ret && lpvBuffer != NULL &&
+			!(dwInfoLevel & MIRAGE_HTTP_QUERY_FLAG_REQUEST_HEADERS) &&
 			(level == MIRAGE_HTTP_QUERY_DATE || level == MIRAGE_HTTP_QUERY_RAW_HEADERS ||
 			 level == MIRAGE_HTTP_QUERY_RAW_HEADERS_CRLF)) {
 		get_lasterrors(&lasterror);
@@ -831,6 +837,7 @@ HOOKDEF(BOOL, WINAPI, HttpQueryInfoA,
 	#undef MIRAGE_HTTP_QUERY_REQUEST_METHOD
 	#undef MIRAGE_HTTP_QUERY_FLAG_NUMBER
 	#undef MIRAGE_HTTP_QUERY_FLAG_SYSTEMTIME
+	#undef MIRAGE_HTTP_QUERY_FLAG_REQUEST_HEADERS
 
 	return ret;
 }
@@ -1132,18 +1139,100 @@ HOOKDEF(ULONG, WINAPI, GetAdaptersAddresses,
 	_In_	PVOID				 Reserved,
 	_Inout_ PVOID				  AdapterAddresses, // PIP_ADAPTER_ADDRESSES
 	_Inout_ PULONG				SizePointer
-) {
-	ULONG ret = Old_GetAdaptersAddresses(Family, Flags, Reserved, AdapterAddresses, SizePointer);
-	LOQ_zero("network", "");
+)
+{
+/* Real-hardware Intel OUI (00:1B:21) stamped over the leading three bytes
+	   of every enumerated adapter's PhysicalAddress. GetAdaptersAddresses is the
+	   modern replacement for GetAdaptersInfo, and samples use it identically:
+	   they read IP_ADAPTER_ADDRESSES.PhysicalAddress and compare the first three
+	   bytes (the OUI) against a blacklist of known virtualization-vendor OUIs —
+	   00:05:69 / 00:50:56 (VMware), 08:00:27 (VirtualBox), 00:1C:42 (Parallels),
+	   00:16:3E (Xen) — treating any match as proof the NIC is virtual and the
+	   host a sandbox. A freshly-imaged guest's synthetic NIC carries one of those
+	   OUIs, so the lookup hits and the sample takes its sandbox-detected branch. */
+	static const BYTE mirage_intel_oui[3] = { 0x00, 0x1B, 0x21 };
+	ULONG ret;
+	lasterror_t lasterror;
+	PIP_ADAPTER_ADDRESSES adapter;
+	unsigned int forged;
+
+	ret = Old_GetAdaptersAddresses(Family, Flags, Reserved, AdapterAddresses, SizePointer);
+
+	/* After the real call succeeds, walk the returned IP_ADAPTER_ADDRESSES linked
+	 * list and overwrite each adapter's PhysicalAddress[0..2] with the
+	 * real-hardware Intel OUI 00:1B:21, keeping PhysicalAddressLength and the low
+	 * bytes of the MAC untouched. The sample's blacklist lookup on the OUI then
+	 * never matches a virtualization vendor, so every NIC reads as genuine
+	 * physical hardware and the host is classified as a real user environment.
+	 * This spoofs the modern adapter-enumeration path identically to the
+	 * GetAdaptersInfo hook. lasterror is preserved around the forged response. */
+	forged = 0;
+	if (!g_config.no_stealth && ret == ERROR_SUCCESS && AdapterAddresses != NULL) {
+		get_lasterrors(&lasterror);
+
+		for (adapter = (PIP_ADAPTER_ADDRESSES)AdapterAddresses; adapter != NULL; adapter = adapter->Next) {
+			if (adapter->PhysicalAddressLength >= 3) {
+				adapter->PhysicalAddress[0] = mirage_intel_oui[0];
+				adapter->PhysicalAddress[1] = mirage_intel_oui[1];
+				adapter->PhysicalAddress[2] = mirage_intel_oui[2];
+				forged++;
+			}
+		}
+
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_zero("misc", "i", "AdaptersForged", forged);
+
 	return ret;
 }
 
 HOOKDEF(DWORD, WINAPI, GetAdaptersInfo,
 	_Out_   PVOID pAdapterInfo, // PIP_ADAPTER_INFO
 	_Inout_ PULONG		   pOutBufLen
-) {
-	DWORD ret = Old_GetAdaptersInfo(pAdapterInfo, pOutBufLen);
-	LOQ_zero("network", "");
+)
+{
+/* Real-hardware Intel OUI (00:1B:21) stamped over the leading three bytes
+	   of every enumerated adapter's MAC. Samples read IP_ADAPTER_INFO.Address
+	   and compare the first three bytes (the OUI) against a blacklist of known
+	   virtualization-vendor OUIs — 00:05:69 / 00:50:56 (VMware), 08:00:27
+	   (VirtualBox), 00:1C:42 (Parallels), 00:16:3E (Xen) — treating any match
+	   as proof the NIC is virtual and the host a sandbox. A freshly-imaged
+	   guest's synthetic NIC carries one of those OUIs, so the lookup hits and
+	   the sample takes its sandbox-detected branch. */
+	static const BYTE mirage_intel_oui[3] = { 0x00, 0x1B, 0x21 };
+	DWORD ret;
+	lasterror_t lasterror;
+	PIP_ADAPTER_INFO adapter;
+	unsigned int forged;
+
+	ret = Old_GetAdaptersInfo(pAdapterInfo, pOutBufLen);
+
+	/* After the real call succeeds, walk the returned IP_ADAPTER_INFO linked
+	 * list and overwrite each adapter's Address[0..2] with the real-hardware
+	 * Intel OUI 00:1B:21, keeping AddressLength (6) and the low three bytes of
+	 * the MAC untouched. The sample's blacklist lookup on the OUI then never
+	 * matches a virtualization vendor, so every NIC reads as genuine physical
+	 * hardware and the host is classified as a real user environment.
+	 * lasterror is preserved around the forged response. */
+	forged = 0;
+	if (!g_config.no_stealth && ret == ERROR_SUCCESS && pAdapterInfo != NULL) {
+		get_lasterrors(&lasterror);
+
+		for (adapter = (PIP_ADAPTER_INFO)pAdapterInfo; adapter != NULL; adapter = adapter->Next) {
+			if (adapter->AddressLength >= 3) {
+				adapter->Address[0] = mirage_intel_oui[0];
+				adapter->Address[1] = mirage_intel_oui[1];
+				adapter->Address[2] = mirage_intel_oui[2];
+				forged++;
+			}
+		}
+
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_zero("misc", "i", "AdaptersForged", forged);
+
 	return ret;
 }
 

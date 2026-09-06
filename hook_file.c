@@ -1428,7 +1428,18 @@ HOOKDEF(HANDLE, WINAPI, FindFirstFileExW,
 	__in		FINDEX_SEARCH_OPS fSearchOp,
 	__reserved  LPVOID lpSearchFilter,
 	__in		DWORD dwAdditionalFlags
-) {
+)
+{
+/* Synthetic oversized regular-file entry forged into the Downloads
+	   enumeration. Named like a genuine Linux install image a real user would
+	   have downloaded; FILE_ATTRIBUTE_NORMAL so it reads as a regular file, and
+	   nFileSizeHigh=0 / nFileSizeLow=0x08000000 (134217728 bytes ~= 128MB)
+	   sits comfortably above the sample's 50MB threshold. */
+	static const wchar_t forced_name[] = L"Ubuntu-24.04-desktop-amd64.iso";
+	lasterror_t downloads_lasterror;
+	LPWIN32_FIND_DATAW find_data;
+	HANDLE probe_handle;
+	WCHAR probe_path[MAX_PATH];
 	HANDLE ret = Old_FindFirstFileExW(lpFileName, fInfoLevelId,
 		lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
 
@@ -1472,6 +1483,61 @@ HOOKDEF(HANDLE, WINAPI, FindFirstFileExW,
 	if (g_config.sys32_ctime.dwLowDateTime && ret != INVALID_HANDLE_VALUE && !wcsicmp(lpFileName, L"c:\\windows\\system32"))
 		((PWIN32_FIND_DATAW)lpFindFileData)->ftCreationTime = g_config.sys32_ctime;
 
+	/* Samples enumerate FOLDERID_Downloads with
+	 * std::filesystem::recursive_directory_iterator — which walks the tree via
+	 * FindFirstFileExW/FindNextFileW — and, for each entry, read
+	 * directory_entry::file_size() (served from the cached WIN32_FIND_DATAW
+	 * nFileSizeHigh/nFileSizeLow) to collect the regular files larger than
+	 * 50MB. If that largeFiles list ends up empty they conclude no real user
+	 * ever downloaded a sizeable file and treat the host as a sandbox. On a
+	 * freshly-imaged analysis VM the Downloads folder is empty or missing, so
+	 * either FindFirstFileExW succeeds on a bare directory whose entries are
+	 * all tiny, or it fails outright (INVALID_HANDLE_VALUE / ERROR_FILE_NOT_FOUND
+	 * / ERROR_PATH_NOT_FOUND) and the caller's walk never begins. When the
+	 * search path resolves under the Downloads folder, forge one oversized
+	 * regular-file entry ("Ubuntu-24.04-desktop-amd64.iso", 128MB) into the
+	 * returned find data so file_size() exceeds 50MB and largeFiles becomes
+	 * non-empty: on a successful real search overwrite the first returned entry
+	 * (typically the "." pseudo-entry the iterator skips) with the synthetic
+	 * file so the very first directory_entry it yields is the large file and the
+	 * rest of the walk continues via FindNextFileW untouched; on a failed real
+	 * search open a genuine single-match handle on System32\kernel32.dll (always
+	 * present, yields exactly one entry whose FindNextFileW immediately reports
+	 * ERROR_NO_MORE_FILES), seed the synthetic file over that result and return
+	 * the real handle so the enumeration begins non-empty. lasterror is
+	 * preserved around the forged response. */
+	if (!g_config.no_stealth && lpFileName != NULL && lpFindFileData != NULL &&
+			(fInfoLevelId == FindExInfoStandard || fInfoLevelId == FindExInfoBasic) &&
+			wcsstr(lpFileName, L"Downloads") != NULL) {
+		get_lasterrors(&downloads_lasterror);
+
+		find_data = (LPWIN32_FIND_DATAW)lpFindFileData;
+
+		if (ret != INVALID_HANDLE_VALUE) {
+			memset(find_data, 0, sizeof(WIN32_FIND_DATAW));
+			find_data->dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+			find_data->nFileSizeHigh = 0;
+			find_data->nFileSizeLow = 0x08000000;
+			lstrcpyW(find_data->cFileName, forced_name);
+		} else if (GetSystemDirectoryW(probe_path, MAX_PATH) != 0) {
+			lstrcatW(probe_path, L"\\kernel32.dll");
+			probe_handle = Old_FindFirstFileExW(probe_path, fInfoLevelId,
+				lpFindFileData, fSearchOp, lpSearchFilter, dwAdditionalFlags);
+
+			if (probe_handle != INVALID_HANDLE_VALUE) {
+				memset(find_data, 0, sizeof(WIN32_FIND_DATAW));
+				find_data->dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+				find_data->nFileSizeHigh = 0;
+				find_data->nFileSizeLow = 0x08000000;
+				lstrcpyW(find_data->cFileName, forced_name);
+
+				ret = probe_handle;
+			}
+		}
+
+		set_lasterrors(&downloads_lasterror);
+	}
+
 	if (ret != INVALID_HANDLE_VALUE)
 		LOQ_handle("filesystem", "Fhh", "FileName", lpFileName,
 			"FirstCreateTimeLow", ((PWIN32_FIND_DATAW)lpFindFileData)->ftCreationTime.dwLowDateTime,
@@ -1512,6 +1578,24 @@ static const wchar_t *g_mirage_taskbar_fake_names_w[] = {
 		{ L"contract.pdf", 194502 },
 		{ L"profile.jpg", 731004 },
 	};
+	/* Self-contained JumpList / AutomaticDestinations padding state. The helper
+	 * functions and globals referenced by earlier drafts were never defined in
+	 * this translation unit, so the slot bookkeeping and synthetic-name table are
+	 * kept local to this hook here. ARTIFACT_THRESHOLD is 20; we pad up to 24 so
+	 * the counted total strictly exceeds the heuristic. */
+	static const wchar_t *g_mirage_jumplist_names[] = {
+		L"1b4dd67f29cb1962.automaticDestinations-ms",
+		L"5f7b5f1e01b83767.automaticDestinations-ms",
+		L"9d1f905ce5044aee.automaticDestinations-ms",
+		L"7e4dca80246863e3.automaticDestinations-ms",
+		L"918e0ecb43d17e23.automaticDestinations-ms",
+		L"a52b0eef4de9ba26.automaticDestinations-ms",
+		L"f01b4d95cf55d32a.automaticDestinations-ms",
+		L"12dc1ea8e34b5a4f.automaticDestinations-ms",
+	};
+	static HANDLE g_mirage_jumplist_handle[8];
+	static unsigned int g_mirage_jumplist_observed[8];
+	static unsigned int g_mirage_jumplist_padtarget[8];
 	static unsigned int fake_enum_count_w;
 	static HANDLE g_mirage_downloads_last_handle;
 	static unsigned int g_mirage_downloads_count;
@@ -1520,6 +1604,10 @@ static const wchar_t *g_mirage_taskbar_fake_names_w[] = {
 	unsigned int fake_total;
 	unsigned int table_total;
 	unsigned int idx;
+	int slot;
+	int i;
+	unsigned int names_total;
+	int is_jumplist_name;
 
 	ret = Old_FindNextFileW(hFindFile, lpFindFileData);
 
@@ -1532,6 +1620,28 @@ static const wchar_t *g_mirage_taskbar_fake_names_w[] = {
 
 	fake_total = sizeof(g_mirage_taskbar_fake_names_w) / sizeof(g_mirage_taskbar_fake_names_w[0]);
 	table_total = sizeof(g_mirage_downloads_fake_entries) / sizeof(g_mirage_downloads_fake_entries[0]);
+
+	/* Recognise a *.automaticDestinations-ms entry name inline (no external helper). */
+	is_jumplist_name = 0;
+	if (ret && lpFindFileData != NULL) {
+		size_t nlen = wcslen(lpFindFileData->cFileName);
+		static const wchar_t suffix[] = L".automaticDestinations-ms";
+		size_t slen = sizeof(suffix) / sizeof(suffix[0]) - 1;
+		if (nlen >= slen &&
+			wcsicmp(lpFindFileData->cFileName + (nlen - slen), suffix) == 0)
+			is_jumplist_name = 1;
+	}
+
+	/* Locate an existing per-handle slot for the active enumeration. */
+	slot = -1;
+	if (hFindFile != NULL && hFindFile != INVALID_HANDLE_VALUE) {
+		for (i = 0; i < 8; i++) {
+			if (g_mirage_jumplist_handle[i] == hFindFile) {
+				slot = i;
+				break;
+			}
+		}
+	}
 
 	if (!g_config.no_stealth && !ret && lpFindFileData != NULL &&
 			hFindFile == (HANDLE)0x00000002) {
@@ -1558,6 +1668,74 @@ static const wchar_t *g_mirage_taskbar_fake_names_w[] = {
 			/* fake entries exhausted; end the enumeration cleanly */
 			ret = FALSE;
 			lasterror.Win32Error = ERROR_NO_MORE_FILES;
+		}
+
+		set_lasterrors(&lasterror);
+	}
+	/* AutomaticDestinations / JumpList artifact enumeration. Samples list
+	 * %APPDATA%\Microsoft\Windows\Recent\AutomaticDestinations\*.automaticDestinations-ms
+	 * and treat a QuickAccess/JumpList artifact count <= ARTIFACT_THRESHOLD (20)
+	 * as a freshly-imaged analysis VM. As with the Downloads walk we only get
+	 * FindNextFileW here, so the search handle is opaque and the path is not
+	 * directly visible; we recognise the enumeration by the *.automaticDestinations-ms
+	 * entry names, keep a per-handle count (seeded with FindFirstFileW's own first
+	 * entry), and once the real enumeration on a known JumpList handle runs dry
+	 * below the threshold, synthesise extra *.automaticDestinations-ms entries until
+	 * the counted total reaches 24 so the artifact count clears the <= 20 heuristic.
+	 * Handled before the generic Downloads block so JumpList handles are not padded
+	 * with Downloads-style names. lasterror is preserved around the forged response. */
+	else if (!g_config.no_stealth && lpFindFileData != NULL &&
+			hFindFile != NULL && hFindFile != INVALID_HANDLE_VALUE &&
+			hFindFile != (HANDLE)0x00000002 &&
+			((ret && is_jumplist_name) || slot >= 0)) {
+		get_lasterrors(&lasterror);
+
+		names_total = sizeof(g_mirage_jumplist_names) / sizeof(g_mirage_jumplist_names[0]);
+
+		if (ret && is_jumplist_name) {
+			/* a real JumpList entry on this handle: register it on first
+			   sighting (seeding the count with FindFirstFileW's own first
+			   entry) and tally this entry */
+			if (slot < 0) {
+				for (i = 0; i < 8; i++) {
+					if (g_mirage_jumplist_handle[i] == NULL) {
+						g_mirage_jumplist_handle[i] = hFindFile;
+						g_mirage_jumplist_observed[i] = 1;
+						g_mirage_jumplist_padtarget[i] = 0;
+						slot = i;
+						break;
+					}
+				}
+			}
+			if (slot >= 0)
+				g_mirage_jumplist_observed[slot]++;
+		} else if (!ret && slot >= 0 &&
+				lasterror.Win32Error == ERROR_NO_MORE_FILES) {
+			/* the real enumeration on a known JumpList handle ran dry: decide
+			   the padding target once (only inflate when the genuine count is
+			   at/below the threshold), then emit synthetic entries until the
+			   counted total reaches it */
+			if (g_mirage_jumplist_padtarget[slot] == 0) {
+				g_mirage_jumplist_padtarget[slot] =
+					(g_mirage_jumplist_observed[slot] <= 20)
+						? 24
+						: g_mirage_jumplist_observed[slot];
+			}
+
+			if (g_mirage_jumplist_observed[slot] < g_mirage_jumplist_padtarget[slot]) {
+				memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAW));
+				lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
+				lstrcpyW(lpFindFileData->cFileName,
+					g_mirage_jumplist_names[g_mirage_jumplist_observed[slot] % names_total]);
+				lpFindFileData->nFileSizeLow = 12288;
+
+				g_mirage_jumplist_observed[slot]++;
+				ret = TRUE;
+				lasterror.Win32Error = ERROR_SUCCESS;
+			} else {
+				/* target reached: release the slot so the handle can be reused */
+				g_mirage_jumplist_handle[slot] = NULL;
+			}
 		}
 
 		set_lasterrors(&lasterror);
@@ -1766,12 +1944,64 @@ HOOKDEF(BOOL, WINAPI, GetDiskFreeSpaceExA,
 	_Out_opt_  PULARGE_INTEGER lpFreeBytesAvailable,
 	_Out_opt_  PULARGE_INTEGER lpTotalNumberOfBytes,
 	_Out_opt_  PULARGE_INTEGER lpTotalNumberOfFreeBytes
-) {
-	BOOL ret = Old_GetDiskFreeSpaceExA(lpDirectoryName, lpFreeBytesAvailable, lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes);
-	LOQ_bool("filesystem", "s", "DirectoryName", lpDirectoryName);
-	if (!g_config.no_stealth && ret && lpTotalNumberOfBytes) {
-		lpTotalNumberOfBytes->QuadPart = SPOOFED_DISK_SIZE - RECOVERY_PARTITION_SIZE;
+)
+{
+BOOL ret;
+	lasterror_t lasterror;
+	ULONGLONG forced_total = 536870912000ull; /* 500 GB */
+	ULONGLONG old_total;
+	ULONGLONG permille;
+
+	ret = Old_GetDiskFreeSpaceExA(lpDirectoryName, lpFreeBytesAvailable,
+		lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes);
+
+	/* Samples call GetDiskFreeSpaceExA for each logical drive (A:-Z:), sum the
+	 * reported lpTotalNumberOfBytes (total capacity) across all drives, and
+	 * treat a summed capacity < 450 GB (450 * 1024^3) as a stripped-down
+	 * analysis VM whose virtual disk is far smaller than a real user's, taking
+	 * their sandbox-detected branch. A freshly-imaged guest is typically
+	 * provisioned with a small disk, so the sum falls short of the threshold.
+	 * When the reported capacity is below the forced 500 GB value, overwrite
+	 * lpTotalNumberOfBytes with 500 GB (536870912000 bytes) so even a single
+	 * drive clears the 450 GB threshold, and scale the free-space out-params
+	 * (lpFreeBytesAvailable / lpTotalNumberOfFreeBytes) by the same factor so
+	 * the reported used/free ratio stays plausible; when there is no usable
+	 * baseline ratio, present a lived-in disk that is ~40% free. lasterror is
+	 * preserved around the forged response so the sample classifies the host as
+	 * a genuine user machine and follows its non-evasive task path. */
+	if (!g_config.no_stealth && ret && lpTotalNumberOfBytes != NULL &&
+			lpTotalNumberOfBytes->QuadPart < forced_total) {
+		get_lasterrors(&lasterror);
+
+		old_total = lpTotalNumberOfBytes->QuadPart;
+
+		if (old_total > 0) {
+			/* preserve the real free-space fraction (in permille) while
+			   growing the total, avoiding 64-bit overflow by dividing first */
+			if (lpFreeBytesAvailable != NULL) {
+				permille = lpFreeBytesAvailable->QuadPart * 1000ull / old_total;
+				lpFreeBytesAvailable->QuadPart = forced_total / 1000ull * permille;
+			}
+			if (lpTotalNumberOfFreeBytes != NULL) {
+				permille = lpTotalNumberOfFreeBytes->QuadPart * 1000ull / old_total;
+				lpTotalNumberOfFreeBytes->QuadPart = forced_total / 1000ull * permille;
+			}
+		} else {
+			/* no usable baseline: report a plausible ~40%-free disk */
+			if (lpFreeBytesAvailable != NULL)
+				lpFreeBytesAvailable->QuadPart = forced_total * 2ull / 5ull;
+			if (lpTotalNumberOfFreeBytes != NULL)
+				lpTotalNumberOfFreeBytes->QuadPart = forced_total * 2ull / 5ull;
+		}
+
+		lpTotalNumberOfBytes->QuadPart = forced_total;
+
+		set_lasterrors(&lasterror);
 	}
+
+	LOQ_bool("misc", "sp", "DirectoryName", lpDirectoryName != NULL ? lpDirectoryName : "",
+		"TotalNumberOfBytes",
+		lpTotalNumberOfBytes != NULL ? (ULONG_PTR)lpTotalNumberOfBytes->QuadPart : 0);
 
 	return ret;
 }
@@ -1781,12 +2011,67 @@ HOOKDEF(BOOL, WINAPI, GetDiskFreeSpaceExW,
 	_Out_opt_  PULARGE_INTEGER lpFreeBytesAvailable,
 	_Out_opt_  PULARGE_INTEGER lpTotalNumberOfBytes,
 	_Out_opt_  PULARGE_INTEGER lpTotalNumberOfFreeBytes
-) {
-	BOOL ret = Old_GetDiskFreeSpaceExW(lpDirectoryName, lpFreeBytesAvailable, lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes);
-	LOQ_bool("filesystem", "u", "DirectoryName", lpDirectoryName);
-	if (!g_config.no_stealth && ret && lpTotalNumberOfBytes) {
-		lpTotalNumberOfBytes->QuadPart = SPOOFED_DISK_SIZE - RECOVERY_PARTITION_SIZE;
+)
+{
+BOOL ret;
+	lasterror_t lasterror;
+	ULONGLONG forced_total = 536870912000ull; /* 500 GB */
+	ULONGLONG old_total;
+	ULONGLONG permille;
+
+	ret = Old_GetDiskFreeSpaceExW(lpDirectoryName, lpFreeBytesAvailable,
+		lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes);
+
+	/* Unicode-path twin of the GetDiskFreeSpaceExA hook: samples call
+	 * GetDiskFreeSpaceExW for each logical drive (A:-Z:), sum the reported
+	 * lpTotalNumberOfBytes (total capacity) across all drives, and treat a
+	 * summed capacity < 450 GB (450 * 1024^3) as a stripped-down analysis VM
+	 * whose virtual disk is far smaller than a real user's, taking their
+	 * sandbox-detected branch. A freshly-imaged guest is typically provisioned
+	 * with a small disk, so the sum falls short of the threshold. Applying the
+	 * same forge here means a Unicode-path rebuild of the sample (or a shared
+	 * CRT wrapper that funnels through the W variant) is covered identically.
+	 * When the reported capacity is below the forced 500 GB value, overwrite
+	 * lpTotalNumberOfBytes with 500 GB (536870912000 bytes) so even a single
+	 * drive clears the 450 GB threshold, and scale the free-space out-params
+	 * (lpFreeBytesAvailable / lpTotalNumberOfFreeBytes) by the same factor so
+	 * the reported used/free ratio stays plausible; when there is no usable
+	 * baseline ratio, present a lived-in disk that is ~40% free. lasterror is
+	 * preserved around the forged response so the sample classifies the host as
+	 * a genuine user machine and follows its non-evasive task path. */
+	if (!g_config.no_stealth && ret && lpTotalNumberOfBytes != NULL &&
+			lpTotalNumberOfBytes->QuadPart < forced_total) {
+		get_lasterrors(&lasterror);
+
+		old_total = lpTotalNumberOfBytes->QuadPart;
+
+		if (old_total > 0) {
+			/* preserve the real free-space fraction (in permille) while
+			   growing the total, avoiding 64-bit overflow by dividing first */
+			if (lpFreeBytesAvailable != NULL) {
+				permille = lpFreeBytesAvailable->QuadPart * 1000ull / old_total;
+				lpFreeBytesAvailable->QuadPart = forced_total / 1000ull * permille;
+			}
+			if (lpTotalNumberOfFreeBytes != NULL) {
+				permille = lpTotalNumberOfFreeBytes->QuadPart * 1000ull / old_total;
+				lpTotalNumberOfFreeBytes->QuadPart = forced_total / 1000ull * permille;
+			}
+		} else {
+			/* no usable baseline: report a plausible ~40%-free disk */
+			if (lpFreeBytesAvailable != NULL)
+				lpFreeBytesAvailable->QuadPart = forced_total * 2ull / 5ull;
+			if (lpTotalNumberOfFreeBytes != NULL)
+				lpTotalNumberOfFreeBytes->QuadPart = forced_total * 2ull / 5ull;
+		}
+
+		lpTotalNumberOfBytes->QuadPart = forced_total;
+
+		set_lasterrors(&lasterror);
 	}
+
+	LOQ_bool("misc", "up", "DirectoryName", lpDirectoryName != NULL ? lpDirectoryName : L"",
+		"TotalNumberOfBytes",
+		lpTotalNumberOfBytes != NULL ? (ULONG_PTR)lpTotalNumberOfBytes->QuadPart : 0);
 
 	return ret;
 }

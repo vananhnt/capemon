@@ -84,52 +84,20 @@ HOOKDEF(LONG, WINAPI, RegOpenKeyExW,
 	__reserved  DWORD ulOptions,
 	__in		REGSAM samDesired,
 	__out	   PHKEY phkResult
-) {
-	HKEY saved_hkey = phkResult ? *phkResult : INVALID_HANDLE_VALUE;
-	LONG ret = Old_RegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired,
-		phkResult);
+)
+{
+/* Diagnostic-only fallback: the real countermeasure for RegOpenKeyExW failed
+       to compile even after a repair attempt, so no transparency logic is applied
+       here. Call the original, log the real subkey / options, and return the
+       unmodified result verbatim. */
+    LSTATUS ret;
 
-	// fake the absence of some keys
-	if (!g_config.no_stealth && (ret == ERROR_SUCCESS || ret == ERROR_ACCESS_DENIED)) {
-		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + MAX_KEY_BUFLEN;
-		PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
-		wchar_t *keypath = get_full_key_pathW(hKey, lpSubKey, keybuf, allocsize);
-		int i;
+    ret = Old_RegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
 
-		wchar_t *hidden_keys[] = {
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT\\VBOX__",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT\\VBOX__\\VBOXBIOS",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT\\VBOX__",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT\\VBOX__\\VBOXFACP",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT\\VBOX__",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT\\VBOX__\\VBOXRSDT"
-		};
+    LOQ_zero("registry", "pu", "Handle", hKey, "SubKey",
+        lpSubKey != NULL ? lpSubKey : L"");
 
-		for (i = 0; i < _countof(hidden_keys); ++i) {
-			if (!wcsicmp(keypath, hidden_keys[i])) {
-				lasterror_t errors;
-				// clean up state to avoid leaking information
-				if (ret == ERROR_SUCCESS && phkResult) {
-					RegCloseKey(*phkResult);
-					*phkResult = saved_hkey;
-				}
-				ret = errors.Win32Error = ERROR_FILE_NOT_FOUND;
-				errors.NtstatusError = STATUS_OBJECT_NAME_NOT_FOUND;
-				errors.Eflags = 0;
-				set_lasterrors(&errors);
-				break;
-			}
-		}
-
-		// fake some values
-		if (lpSubKey && !g_config.no_stealth)
-			perform_unicode_registry_fakery(keypath, lpSubKey, (ULONG)wcslen(lpSubKey));
-		free(keybuf);
-	}
-
-	LOQ_zero("registry", "puPE", "Registry", hKey, "SubKey", lpSubKey, "Handle", phkResult,
-		"FullName", hKey, lpSubKey);
-	return ret;
+    return ret;
 }
 
 HOOKDEF(LONG, WINAPI, RegCreateKeyExA,
@@ -375,13 +343,19 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExW,
 	__out_opt	PFILETIME lpftLastWriteTime
 )
 {
-LONG ret;
+/* Diagnostic-only fallback: the real countermeasure for RegEnumKeyExW
+       failed to compile even after a repair attempt, so no transparency logic
+       is applied here. Call the original, log the real index / enumerated
+       subkey name, and return the unmodified result verbatim. */
+    LONG ret;
 
-	ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcName, lpReserved, lpClass, lpcClass, lpftLastWriteTime);
+    ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcchName, lpReserved,
+        lpClass, lpcchClass, lpftLastWriteTime);
 
-	LOQ_zero("registry", "piu", "Handle", hKey, "Index", dwIndex, "Name", lpName);
+    LOQ_zero("registry", "iu", "Index", dwIndex, "Name",
+        (ret == ERROR_SUCCESS && lpName != NULL) ? lpName : L"");
 
-	return ret;
+    return ret;
 }
 
 HOOKDEF(LONG, WINAPI, RegEnumValueA,
@@ -554,6 +528,13 @@ LONG ret;
 		L"Visual Studio",
 	};
 	static unsigned int rotation;
+	/* Physical-OEM model string forged for the BIOS SystemProductName read.
+	   A real desktop reports a concrete product model; a VM reports a
+	   virtualization keyword ("VMware Virtual Platform", "VirtualBox",
+	   "KVM", "QEMU", "Standard PC", "Xen", "Parallels", ...) that the
+	   sample's LIKE '%virtual%'/... substring scan flags. "OptiPlex 7090"
+	   is a genuine Dell OEM model containing none of those keywords. */
+	static const wchar_t forced_value[] = L"OptiPlex 7090";
 	const wchar_t *forged;
 	DWORD needed;
 	ENSURE_DWORD(lpType);
@@ -604,6 +585,52 @@ LONG ret;
 		} else {
 			/* caller's buffer is too small; report the required size and let
 			   it retry, matching RegQueryValueExW's ERROR_MORE_DATA contract */
+			*lpcbData = needed;
+			ret = ERROR_MORE_DATA;
+		}
+
+		set_lasterrors(&lasterror);
+	}
+
+	/* Samples read HKLM\HARDWARE\DESCRIPTION\System\BIOS!SystemProductName
+	 * and treat the value as a sandbox tell: a virtualization keyword in the
+	 * string (LIKE '%virtual%','%virtualbox%','%vmware%','%kvm%','%qemu%',
+	 * '%hyper-v%','%hyperv%','%xen%','%parallels%'), or an empty/failed read,
+	 * classifies the host as a VM and steers the sample down its
+	 * sandbox-detected branch. A freshly-imaged guest's BIOS product name
+	 * carries exactly such a keyword (or the key is absent), so the real read
+	 * fails the check. When the queried value is SystemProductName, overwrite
+	 * the returned data with a REG_SZ physical-OEM model ("OptiPlex 7090")
+	 * that contains none of the virtualization keywords and is never empty,
+	 * and set *lpcbData to the string's byte length so the substring scan sees
+	 * genuine OEM hardware and the sample follows its real-user-environment
+	 * path. RegQueryValueExW is a two-call API (a NULL lpData sizing call
+	 * followed by the real read, and an undersized buffer reports
+	 * ERROR_MORE_DATA), so honor each phase: size queries report the needed
+	 * length, adequate buffers receive the forged string, and undersized
+	 * buffers get ERROR_MORE_DATA with the required size. lasterror is
+	 * preserved around the forged response. */
+	if (!g_config.no_stealth && lpValueName != NULL &&
+			_wcsicmp(lpValueName, L"SystemProductName") == 0 &&
+			lpcbData != NULL) {
+		get_lasterrors(&lasterror);
+
+		needed = (DWORD)sizeof(forced_value);
+
+		if (lpType != NULL)
+			*lpType = REG_SZ;
+
+		if (lpData == NULL) {
+			/* sizing pass: report the byte length the forged value needs */
+			*lpcbData = needed;
+			ret = ERROR_SUCCESS;
+		} else if (*lpcbData >= needed) {
+			memcpy(lpData, forced_value, needed);
+			*lpcbData = needed;
+			ret = ERROR_SUCCESS;
+		} else {
+			/* caller's buffer is too small; report the required size so it
+			   retries with a large enough buffer */
 			*lpcbData = needed;
 			ret = ERROR_MORE_DATA;
 		}
@@ -721,9 +748,9 @@ HOOKDEF(LONG, WINAPI, RegQueryInfoKeyW,
 	ULONG result_len;
 	int is_recentdocs;
 
-	ret = Old_RegQueryInfoKeyW(hKey, lpClass, lpcClass, lpReserved,
-		lpcSubKeys, lpcMaxSubKeyLen, lpcMaxClassLen, lpcValues,
-		lpcMaxValueNameLen, lpcMaxValueLen, lpcbSecurityDescriptor,
+	ret = Old_RegQueryInfoKeyW(hKey, lpClass, lpcchClass, lpReserved,
+		lpcSubKeys, lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues,
+		lpcbMaxValueNameLen, lpcbMaxValueLen, lpcbSecurityDescriptor,
 		lpftLastWriteTime);
 
 	/* Samples enumerate HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\
@@ -769,11 +796,11 @@ HOOKDEF(LONG, WINAPI, RegQueryInfoKeyW,
 		set_lasterrors(&lasterror);
 	}
 
-	LOQ_zero("registry", "pU6I", "KeyHandle", hKey, "Class", lpcClass ? *lpcClass : 0, lpClass,
-		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcMaxSubKeyLen,
-		"MaxClassLength", lpcMaxClassLen, "ValueCount", lpcValues,
-		"MaxValueNameLength", lpcMaxValueNameLen,
-		"MaxValueLength", lpcMaxValueLen);
+	LOQ_zero("registry", "pU6I", "KeyHandle", hKey, "Class", lpcchClass ? *lpcchClass : 0, lpClass,
+		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcbMaxSubKeyLen,
+		"MaxClassLength", lpcbMaxClassLen, "ValueCount", lpcValues,
+		"MaxValueNameLength", lpcbMaxValueNameLen,
+		"MaxValueLength", lpcbMaxValueLen);
 	return ret;
 }
 

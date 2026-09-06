@@ -119,10 +119,60 @@ HOOKDEF(int, WSAAPI, connect,
 	__in  SOCKET s,
 	__in  const struct sockaddr *name,
 	__in  int namelen
-) {
-	int ret = Old_connect(s, name, namelen);
-	char ip[INET6_ADDRSTRLEN]; int port = 0;
-	get_ip_port(name, ip, &port, INET6_ADDRSTRLEN);
+)
+{
+int ret;
+	char ip[65]; int port = 0;
+	lasterror_t lasterror;
+	const struct sockaddr_in *sin;
+	int is_blackhole;
+
+	/* Recognise the sample's non-routable blocking-timer connect: an AF_INET
+	   connect() to 10.255.255.1 (the classic RFC1918 black-hole host used
+	   purely as a timer, here on port 12345). We match on the destination
+	   address alone — 10.255.255.1 is never a real service endpoint — so
+	   genuine outbound connections are left untouched. */
+	is_blackhole = 0;
+	if (name != NULL && namelen >= (int)sizeof(struct sockaddr_in) &&
+			name->sa_family == AF_INET) {
+		sin = (const struct sockaddr_in *)name;
+		if (sin->sin_addr.S_un.S_un_b.s_b1 == 10 &&
+				sin->sin_addr.S_un.S_un_b.s_b2 == 255 &&
+				sin->sin_addr.S_un.S_un_b.s_b3 == 255 &&
+				sin->sin_addr.S_un.S_un_b.s_b4 == 1)
+			is_blackhole = 1;
+	}
+
+	/* Samples issue an outbound TCP connect() to a non-routable address
+	 * (10.255.255.1:12345) with a 10000ms SO_RCVTIMEO/SO_SNDTIMEO socket
+	 * timeout, repeated up to 50 times, purely as a blocking timer: they
+	 * REQUIRE every attempt to fail (connectResult == SOCKET_ERROR) and treat
+	 * an unexpected success as proof of a sandbox network-emulation layer that
+	 * fakes connectivity, aborting into their sandbox-detected branch. On a
+	 * genuine host each connect blocks for the full timeout and then fails, so
+	 * 50 attempts stall the analysis for ~500 seconds. The transparent answer
+	 * is NOT the generic 'connect succeeds' recipe — a forged success here
+	 * triggers the abort — but to return the exact failure the sample expects,
+	 * instantly: when the destination is that black-hole address, do NOT call
+	 * the original connect() (which would actually block ~10s per attempt), and
+	 * instead return SOCKET_ERROR with WSAGetLastError() == WSAETIMEDOUT (10060,
+	 * the code a real timed-out connect yields) with no blocking wait. This
+	 * satisfies the sample's per-attempt SOCKET_ERROR success condition
+	 * (delaySuccessful, 'user environment' assumed) while collapsing the ~500s
+	 * stall to near-zero. Every other connect target is passed straight through
+	 * to the real API untouched. lasterror is set to WSAETIMEDOUT for the forged
+	 * response. */
+	if (!g_config.no_stealth && is_blackhole) {
+		get_lasterrors(&lasterror);
+		lasterror.Win32Error = WSAETIMEDOUT;
+		set_lasterrors(&lasterror);
+
+		ret = SOCKET_ERROR;
+	} else {
+		ret = Old_connect(s, name, namelen);
+	}
+
+	get_ip_port(name, ip, &port, 65);
 	LOQ_sockerr("network", "isi", "socket", s, "ip", ip, "port", port);
 	if (g_config.dump_config_region) {
 		if (DumpRegion((PVOID)name))

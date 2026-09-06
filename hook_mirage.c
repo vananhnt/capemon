@@ -6,49 +6,34 @@
 #include "hooking.h"
 #include <tlhelp32.h>
 #include <slpublic.h>
+#include <winspool.h>
+#include <psapi.h>
 #include "log.h"
 #include "config.h"
 
-/* Case-insensitive ASCII substring search used by the FindFirstFileA /
- * FindNextFileA hooks below. Returns a pointer into haystack at the first
- * match, or NULL. Local to this translation unit so the generated hooks stay
- * self-contained. */
+/* Case-insensitive ASCII substring search used by the FindFirstFileA hook to
+ * recognise the TaskBar/Documents search masks. Returns a pointer into
+ * haystack at the first match, or NULL. Takes const inputs so it accepts the
+ * LPCSTR path arguments without a cast/discard-qualifier warning. */
 static const char *mirage_stristr_ascii(const char *haystack, const char *needle)
 {
-	size_t i, nlen;
+	size_t needle_len;
+	const char *p;
 
 	if (haystack == NULL || needle == NULL)
 		return NULL;
 
-	nlen = strlen(needle);
-	if (nlen == 0)
+	needle_len = strlen(needle);
+	if (needle_len == 0)
 		return haystack;
 
-	for (; *haystack != '\0'; haystack++) {
-		for (i = 0; i < nlen; i++) {
-			char a = haystack[i];
-			char b = needle[i];
-			if (a == '\0')
-				return NULL;
-			if (a >= 'A' && a <= 'Z')
-				a = (char)(a - 'A' + 'a');
-			if (b >= 'A' && b <= 'Z')
-				b = (char)(b - 'A' + 'a');
-			if (a != b)
-				break;
-		}
-		if (i == nlen)
-			return haystack;
+	for (p = haystack; *p != '\0'; p++) {
+		if (_strnicmp(p, needle, needle_len) == 0)
+			return p;
 	}
 
 	return NULL;
 }
-
-/* SetupDiCreateDeviceInfoList is resolved dynamically from setupapi.dll (already
- * loaded in the process because SetupDiGetClassDevs is hooked) so the module
- * does not need a static link dependency on setupapi.lib. */
-typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
-	const GUID *ClassGuid, HWND hwndParent);
 
         HOOKDEF(BOOL, WINAPI, GetSystemPowerStatus, LPSYSTEM_POWER_STATUS lpSystemPowerStatus)
         {
@@ -78,8 +63,54 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
+	LOQ_bool("misc", "iii", "ACLineStatus",
+		lpSystemPowerStatus != NULL ? lpSystemPowerStatus->ACLineStatus : 0,
+		"BatteryFlag",
+		lpSystemPowerStatus != NULL ? lpSystemPowerStatus->BatteryFlag : 0,
+		"BatteryLifePercent",
+		lpSystemPowerStatus != NULL ? lpSystemPowerStatus->BatteryLifePercent : 0);
+
 	return ret;
         }
+
+    HOOKDEF(BOOL, WINAPI, QueryServiceStatusEx, SC_HANDLE hService, SC_STATUS_TYPE InfoLevel, LPBYTE lpBuffer, DWORD cbBufSize, LPDWORD pcbBytesNeeded)
+    {
+        BOOL ret;
+lasterror_t lasterror;
+SERVICE_STATUS_PROCESS *ssp;
+
+ret = Old_QueryServiceStatusEx(hService, InfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
+
+/* Samples open the Connected User Experiences and Telemetry service
+ * ("DiagTrack") and query its live state with
+ * QueryServiceStatusEx(SC_STATUS_PROCESS_INFO), reading the returned
+ * SERVICE_STATUS_PROCESS.dwCurrentState. isServiceRunning() is true only
+ * when that field equals SERVICE_RUNNING (0x00000004); a freshly-imaged
+ * analysis VM frequently has DiagTrack stopped/disabled, so the state
+ * reads as SERVICE_STOPPED and the check concludes the host lacks the
+ * always-on telemetry service a genuine, long-lived Windows desktop runs,
+ * steering the sample into its sandbox-detected branch. After the real
+ * call succeeds and returns a SERVICE_STATUS_PROCESS, overwrite
+ * dwCurrentState with SERVICE_RUNNING so isServiceRunning() evaluates true
+ * and the sample follows its normal task-routine path. lasterror is
+ * preserved around the forged response. */
+if (!g_config.no_stealth && ret && InfoLevel == SC_STATUS_PROCESS_INFO &&
+        lpBuffer != NULL && cbBufSize >= sizeof(SERVICE_STATUS_PROCESS)) {
+    get_lasterrors(&lasterror);
+
+    ssp = (SERVICE_STATUS_PROCESS *)lpBuffer;
+    ssp->dwCurrentState = SERVICE_RUNNING;
+
+    set_lasterrors(&lasterror);
+}
+
+LOQ_bool("registry", "ii", "InfoLevel", (int)InfoLevel, "CurrentState",
+    (ret && lpBuffer != NULL && InfoLevel == SC_STATUS_PROCESS_INFO &&
+        cbBufSize >= sizeof(SERVICE_STATUS_PROCESS)) ?
+        (int)((SERVICE_STATUS_PROCESS *)lpBuffer)->dwCurrentState : 0);
+
+return ret;
+    }
 
         HOOKDEF(BOOL, WINAPI, FindNextFileA, HANDLE hFindFile, LPWIN32_FIND_DATAA lpFindFileData)
         {
@@ -182,6 +213,9 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
+	LOQ_bool("misc", "s", "FileName",
+		(ret && lpFindFileData != NULL) ? lpFindFileData->cFileName : "");
+
 	return ret;
         }
 
@@ -252,12 +286,17 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
+	LOQ_handle("misc", "ss", "FileName", lpFileName != NULL ? lpFileName : "",
+		"FirstEntry",
+		(ret != INVALID_HANDLE_VALUE && lpFindFileData != NULL) ? lpFindFileData->cFileName : "");
+
 	return ret;
         }
 
         HOOKDEF(void, WINAPI, GetNativeSystemInfo, LPSYSTEM_INFO lpSystemInfo)
         {
-            lasterror_t lasterror;
+            int ret = 0;
+	lasterror_t lasterror;
 
 	Old_GetNativeSystemInfo(lpSystemInfo);
 
@@ -279,6 +318,9 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 
 		set_lasterrors(&lasterror);
 	}
+
+	LOQ_void("misc", "i", "NumberOfProcessors",
+		lpSystemInfo != NULL ? lpSystemInfo->dwNumberOfProcessors : 0);
 
 	return;
         }
@@ -349,6 +391,104 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
+	LOQ_bool("misc", "ii", "KernelTime",
+		lpKernelTime != NULL ? lpKernelTime->dwLowDateTime : 0,
+		"UserTime",
+		lpUserTime != NULL ? lpUserTime->dwLowDateTime : 0);
+
+	return ret;
+        }
+
+        HOOKDEF(BOOL, WINAPI, QueryPerformanceCounter, LARGE_INTEGER *lpPerformanceCount)
+        {
+            BOOL ret;
+	lasterror_t lasterror;
+	static LARGE_INTEGER qpc_base;
+	static LARGE_INTEGER qpc_freq;
+	static ULONGLONG cpu_base_100ns;
+	static int base_initialized;
+	FILETIME ftCreation, ftExit, ftKernel, ftUser;
+	ULARGE_INTEGER uKernel, uUser;
+	ULONGLONG cpu_now_100ns;
+	ULONGLONG cpu_delta_100ns;
+	ULONGLONG wall_ticks;
+
+	ret = Old_QueryPerformanceCounter(lpPerformanceCount);
+
+	/* Companion / alternative to the GetProcessTimes hook on the CPU-vs-wall
+	 * timing-skew check. Samples fingerprint scheduler/virtualization overhead
+	 * by bracketing a ~2-second busy loop with two GetProcessTimes reads
+	 * (kernel+user CPU time) and two QueryPerformanceCounter reads, then divide
+	 * the CPU-time delta by the QPC wall-clock delta:
+	 * ratio = cpuDeltaSec / wallDeltaSec, where
+	 * wallDeltaSec = (qpcEnd - qpcStart) / QueryPerformanceFrequency. On bare
+	 * metal a busy loop pins one core so the ratio sits near 1.0, but under a
+	 * contended or throttled analysis VM the reported CPU time lags the wall
+	 * clock and the ratio drops below a core-count-adjusted threshold
+	 * (~0.28..0.3675, base 0.35), which the sample reads as "running
+	 * virtualized". The GetProcessTimes hook neutralizes this by inflating the
+	 * reported CPU time to ~0.9x wall; this hook attacks the same ratio from the
+	 * denominator instead — it compresses the reported wall-clock delta so it
+	 * stays proportional to the true CPU time consumed, keeping the ratio ~0.9
+	 * whichever term the sample derives from which API.
+	 *
+	 * On the first call, capture a QPC baseline (the genuine counter value) and
+	 * a CPU-time baseline (raw kernel+user 100ns read via GetProcessTimes). On
+	 * every later call, remap the returned counter to
+	 *   qpc_base + QueryPerformanceFrequency * cpuDeltaSec / 0.9
+	 * i.e. advance it by only cpuDeltaSec/0.9 seconds' worth of ticks
+	 * (denominator shrunk to hold the ratio at ~0.9). Because both bracketing
+	 * reads are derived from the same baselines and the same reported frequency,
+	 * the sample computes wallDeltaSec == cpuDeltaSec/0.9, so
+	 * ratio == cpuDeltaSec / (cpuDeltaSec/0.9) == 0.9 — comfortably above the
+	 * threshold and internally consistent with QueryPerformanceFrequency, so no
+	 * second-order frequency/counter mismatch is exposed. lasterror is
+	 * preserved. */
+	if (!g_config.no_stealth && ret && lpPerformanceCount != NULL) {
+		get_lasterrors(&lasterror);
+
+		if (!base_initialized) {
+			if (QueryPerformanceFrequency(&qpc_freq) && qpc_freq.QuadPart > 0 &&
+					GetProcessTimes(GetCurrentProcess(), &ftCreation,
+						&ftExit, &ftKernel, &ftUser)) {
+				uKernel.LowPart = ftKernel.dwLowDateTime;
+				uKernel.HighPart = ftKernel.dwHighDateTime;
+				uUser.LowPart = ftUser.dwLowDateTime;
+				uUser.HighPart = ftUser.dwHighDateTime;
+				cpu_base_100ns = uKernel.QuadPart + uUser.QuadPart;
+				qpc_base = *lpPerformanceCount;
+				base_initialized = 1;
+			}
+		}
+
+		if (base_initialized && qpc_freq.QuadPart > 0 &&
+				GetProcessTimes(GetCurrentProcess(), &ftCreation, &ftExit,
+					&ftKernel, &ftUser)) {
+			uKernel.LowPart = ftKernel.dwLowDateTime;
+			uKernel.HighPart = ftKernel.dwHighDateTime;
+			uUser.LowPart = ftUser.dwLowDateTime;
+			uUser.HighPart = ftUser.dwHighDateTime;
+			cpu_now_100ns = uKernel.QuadPart + uUser.QuadPart;
+
+			if (cpu_now_100ns > cpu_base_100ns) {
+				cpu_delta_100ns = cpu_now_100ns - cpu_base_100ns;
+				/* wallSec = cpuSec / 0.9; ticks = wallSec * freq =
+				   freq * cpu_delta_100ns * 10 / (9 * 10000000) */
+				wall_ticks = (ULONGLONG)qpc_freq.QuadPart * cpu_delta_100ns *
+					10ull / (9ull * 10000000ull);
+				lpPerformanceCount->QuadPart =
+					qpc_base.QuadPart + (LONGLONG)wall_ticks;
+			} else {
+				lpPerformanceCount->QuadPart = qpc_base.QuadPart;
+			}
+		}
+
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_bool("misc", "i", "PerformanceCount",
+		lpPerformanceCount != NULL ? (int)lpPerformanceCount->LowPart : 0);
+
 	return ret;
         }
 
@@ -377,6 +517,9 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
+	LOQ_bool("registry", "i", "NumberOfRecords",
+		NumberOfRecords != NULL ? *NumberOfRecords : 0);
+
 	return ret;
         }
 
@@ -391,24 +534,26 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 
 	/* Samples enumerate *.automaticDestinations-ms entries under
 	 * %APPDATA%\Microsoft\Windows\Recent\AutomaticDestinations via
-	 * FindFirstFileW/FindNextFileW, count the per-app JumpList stores, and treat
-	 * a total <= 20 as a freshly-imaged analysis VM with no real usage history.
-	 * On such a VM the Recent\AutomaticDestinations folder is often missing or
-	 * bare, so FindFirstFileW fails outright (INVALID_HANDLE_VALUE /
-	 * ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND) and the caller's do/while
-	 * enumeration loop never begins. The companion FindNextFileW hook inflates
-	 * the JumpList tally to 24 entries once a search runs dry, but it keys that
+	 * FindFirstFileW/FindNextFileW to collect the QuickAccess/JumpList stores,
+	 * count the per-app entries, and treat a total <= 20 as a freshly-imaged
+	 * analysis VM with no real usage history. On such a VM the
+	 * Recent\AutomaticDestinations folder is often missing or bare, so
+	 * FindFirstFileW fails outright (INVALID_HANDLE_VALUE / ERROR_FILE_NOT_FOUND
+	 * / ERROR_PATH_NOT_FOUND) and the caller's do/while enumeration loop never
+	 * begins. The companion FindNextFileW hook inflates the JumpList tally past
+	 * the threshold (to 24 entries) once a search runs dry, but it keys that
 	 * tally off the live find handle and only fires when the real enumeration
 	 * ends with ERROR_NO_MORE_FILES, so it needs a genuine, walkable search
-	 * handle to attach to. When the search names the AutomaticDestinations path
-	 * and the real search failed, open a real single-match find handle (on
+	 * handle to attach to. Detect the AutomaticDestinations search pattern and,
+	 * when the real search failed, open a real single-match find handle (on
 	 * System32\kernel32.dll, which always exists and yields exactly one entry
-	 * whose FindNextFileW immediately reports ERROR_NO_MORE_FILES), overwrite
-	 * that first result with a synthetic .automaticDestinations-ms entry, and
+	 * whose FindNextFileW immediately reports ERROR_NO_MORE_FILES), seed the
+	 * first synthetic *.automaticDestinations-ms entry over that result, and
 	 * return the real handle. The scan then begins non-empty and the paired
-	 * FindNextFileW hook drives the count comfortably past the <= 20 threshold,
-	 * so checkCondition() classifies the host as a genuine user environment even
-	 * when the on-disk JumpList seed is absent. */
+	 * FindNextFileW hook keeps yielding fake JumpList files until the count
+	 * exceeds 20, so checkCondition() classifies the host as a genuine user
+	 * environment even when the on-disk JumpList seed is absent. lasterror is
+	 * preserved around the forged response. */
 	if (!g_config.no_stealth && ret == INVALID_HANDLE_VALUE &&
 			lpFileName != NULL && lpFindFileData != NULL &&
 			wcsstr(lpFileName, L"AutomaticDestinations") != NULL) {
@@ -421,7 +566,7 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 			if (probe_handle != INVALID_HANDLE_VALUE) {
 				memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAW));
 				lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
-				lstrcpyW(lpFindFileData->cFileName, L"1bc392b8e104a00e.automaticDestinations-ms");
+				lstrcpyW(lpFindFileData->cFileName, L"1b4dd67f29cb1962.automaticDestinations-ms");
 				lpFindFileData->nFileSizeLow = 12288;
 
 				ret = probe_handle;
@@ -431,6 +576,10 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
+	LOQ_handle("misc", "uu", "FileName", lpFileName != NULL ? lpFileName : L"",
+		"FirstEntry",
+		(ret != INVALID_HANDLE_VALUE && lpFindFileData != NULL) ? lpFindFileData->cFileName : L"");
+
 	return ret;
         }
 
@@ -439,7 +588,7 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
             /* Minimal layout-compatible mirror of PRINTER_INFO_2W: winspool
 	       packs an array of these fixed-size structs at the front of the
 	       output buffer with their variable-length strings at the tail, so we
-	       only need the field ordering to be correct to append one entry and
+	       only need the field ordering to be correct to write one entry and
 	       point pPrinterName at a forged string. Pointer/DWORD widths match the
 	       real struct on both 32- and 64-bit. */
 	typedef struct {
@@ -470,9 +619,6 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 	lasterror_t lasterror;
 	static const wchar_t fake_name[] = L"HP LaserJet Pro M404n";
 	DWORD entry_size;
-	DWORD array_bytes;
-	DWORD string_bytes;
-	DWORD new_total;
 	DWORD name_off;
 	mirage_printer_info_2w_t *info;
 
@@ -484,58 +630,59 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 	 * microsoft/virtual; if the surviving physical-printer list
 	 * (physicalPrinters) is empty they treat the host as a bare analysis VM
 	 * with no real print hardware and checkCondition() flags it. EnumPrinters
-	 * is a two-pass API: a first call with an undersized buffer fails with
-	 * ERROR_INSUFFICIENT_BUFFER and reports the required size in *pcbNeeded,
-	 * then the caller retries with a large enough buffer. Grow *pcbNeeded on
-	 * the sizing pass, and on the successful data pass append one synthetic
-	 * PRINTER_INFO_2W whose pPrinterName is "HP LaserJet Pro M404n" and bump
-	 * *pcReturned; that name contains none of the virtual-printer keywords so
-	 * it survives isVirtualPrinter() filtering, physicalPrinters becomes
-	 * non-empty and checkCondition() returns true. */
+	 * is a two-pass API: a first call with an undersized (or NULL) buffer
+	 * fails with ERROR_INSUFFICIENT_BUFFER and reports the required size in
+	 * *pcbNeeded, then the caller retries with a large enough buffer. Forge
+	 * the enumeration so it presents exactly one synthetic PRINTER_INFO_2W for
+	 * a real-looking physical printer ("HP LaserJet Pro M404n"): on the sizing
+	 * pass report the single-record size in *pcbNeeded, and on the fill pass
+	 * write that one record (struct at the front, forged pPrinterName string
+	 * at the tail), set *pcReturned = 1 and *pcbNeeded to the record size. The
+	 * forged name contains none of the virtual-printer keywords so it survives
+	 * isVirtualPrinter() filtering, physicalPrinters becomes non-empty and
+	 * checkCondition() returns true. lasterror is preserved around the forged
+	 * response. */
 	if (!g_config.no_stealth && Level == 2 && pcbNeeded != NULL && pcReturned != NULL) {
 		get_lasterrors(&lasterror);
 
 		entry_size = (DWORD)(sizeof(mirage_printer_info_2w_t) + sizeof(fake_name));
 
-		if (!ret && lasterror.Win32Error == ERROR_INSUFFICIENT_BUFFER) {
-			/* sizing pass: reserve room for the extra synthetic entry so
-			   the caller's follow-up buffer is large enough to hold it */
-			*pcbNeeded += entry_size;
-		} else if (ret && pPrinterEnum != NULL) {
-			array_bytes = (DWORD)(sizeof(mirage_printer_info_2w_t) * (*pcReturned));
-			string_bytes = *pcbNeeded - array_bytes;
-			new_total = *pcbNeeded + entry_size;
+		if (pPrinterEnum == NULL || cbBuf < entry_size) {
+			/* sizing pass (or buffer too small to hold our one record):
+			   report the single-record size and fail with
+			   ERROR_INSUFFICIENT_BUFFER so the caller retries with a
+			   large-enough buffer */
+			*pcbNeeded = entry_size;
+			*pcReturned = 0;
+			lasterror.Win32Error = ERROR_INSUFFICIENT_BUFFER;
+			ret = FALSE;
+		} else {
+			/* fill pass: place the struct at the front of the buffer and
+			   the forged pPrinterName string at the tail, then report a
+			   single returned entry */
+			info = (mirage_printer_info_2w_t *)pPrinterEnum;
+			name_off = cbBuf - (DWORD)sizeof(fake_name);
+			memcpy(pPrinterEnum + name_off, fake_name, sizeof(fake_name));
 
-			if (cbBuf >= new_total) {
-				info = (mirage_printer_info_2w_t *)pPrinterEnum;
+			memset(info, 0, sizeof(mirage_printer_info_2w_t));
+			info->pPrinterName = (LPWSTR)(pPrinterEnum + name_off);
+			info->pDriverName = (LPWSTR)(pPrinterEnum + name_off);
+			info->pPortName = (LPWSTR)(pPrinterEnum + name_off);
+			info->Attributes = PRINTER_ATTRIBUTE_LOCAL;
 
-				/* winspool packs the struct array at the front of the
-				   buffer and the strings at the tail. Place the new
-				   pPrinterName string just below the existing string block
-				   and the new struct slot right after the current array;
-				   both land in the previously-unused slack between them, so
-				   no existing struct or string is disturbed and the original
-				   entries' pointers stay valid. */
-				name_off = cbBuf - string_bytes - (DWORD)sizeof(fake_name);
-				memcpy(pPrinterEnum + name_off, fake_name, sizeof(fake_name));
-
-				memset(&info[*pcReturned], 0, sizeof(mirage_printer_info_2w_t));
-				info[*pcReturned].pPrinterName = (LPWSTR)(pPrinterEnum + name_off);
-				info[*pcReturned].pDriverName = (LPWSTR)(pPrinterEnum + name_off);
-				info[*pcReturned].pPortName = (LPWSTR)(pPrinterEnum + name_off);
-				info[*pcReturned].Attributes = PRINTER_ATTRIBUTE_LOCAL;
-
-				*pcReturned += 1;
-				*pcbNeeded = new_total;
-			} else {
-				/* buffer lacks slack for the extra entry; report the larger
-				   size so the caller retries with a big enough buffer */
-				*pcbNeeded = new_total;
-			}
+			*pcReturned = 1;
+			*pcbNeeded = entry_size;
+			lasterror.Win32Error = ERROR_SUCCESS;
+			ret = TRUE;
 		}
 
 		set_lasterrors(&lasterror);
 	}
+
+	LOQ_bool("misc", "iu", "Level", Level, "PrinterName",
+		(ret && Level == 2 && pcReturned != NULL && *pcReturned > 0 &&
+		 pPrinterEnum != NULL) ?
+			((mirage_printer_info_2w_t *)pPrinterEnum)->pPrinterName : L"");
 
 	return ret;
         }
@@ -548,15 +695,16 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 	ret = Old_SHQueryRecycleBinA(pszRootPath, pSHQueryRBInfo);
 
 	/* Samples query the Recycle Bin via SHQueryRecycleBinA and read
-	 * SHQUERYRBINFO.i64NumItems, treating a deleted-item count below 100 as a
-	 * freshly-imaged analysis VM whose Recycle Bin was never filled by real
-	 * user activity, taking their sandbox-detected branch. A bare guest's
-	 * Recycle Bin is typically empty (or holds only a handful of items), so the
-	 * real count falls well short of the threshold. Overwrite i64NumItems with
-	 * 150 (comfortably past the 100-item threshold) and give i64Size a matching
-	 * non-zero byte total so the reported bin looks lived-in, then return S_OK
-	 * so the sample classifies the host as a genuine, long-used user machine
-	 * and follows its non-evasive task path. */
+	 * SHQUERYRBINFO.i64NumItems, treating a deleted-item count below 100
+	 * (RECYCLE_BIN_ITEM_THRESHOLD) as a freshly-imaged analysis VM whose Recycle
+	 * Bin was never filled by real user activity, taking their sandbox-detected
+	 * branch. A bare guest's Recycle Bin is typically empty (or holds only a
+	 * handful of items), so the real count falls well short of the threshold.
+	 * Overwrite i64NumItems with 150 (comfortably past the 100-item threshold)
+	 * and give i64Size a proportional non-zero byte total so the reported bin
+	 * looks lived-in, then return S_OK so the sample classifies the host as a
+	 * genuine, long-used user machine and follows its non-evasive task path.
+	 * lasterror is preserved around the forged response. */
 	if (!g_config.no_stealth && pSHQueryRBInfo != NULL &&
 			pSHQueryRBInfo->i64NumItems < 100) {
 		get_lasterrors(&lasterror);
@@ -568,6 +716,10 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 
 		set_lasterrors(&lasterror);
 	}
+
+	LOQ_hresult("misc", "si", "RootPath", pszRootPath != NULL ? pszRootPath : "",
+		"NumItems",
+		pSHQueryRBInfo != NULL ? (int)pSHQueryRBInfo->i64NumItems : 0);
 
 	return ret;
         }
@@ -621,13 +773,18 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
+	LOQ_bool("misc", "i", "MemberIndex", MemberIndex);
+
 	return ret;
         }
 
-        HOOKDEF(HDEVINFO, WINAPI, SetupDiGetClassDevs, const GUID* ClassGuid, PCSTR Enumerator, HWND hwndParent, DWORD Flags)
+        HOOKDEF(HDEVINFO, WINAPI, SetupDiGetClassDevs, const GUID *ClassGuid, PCWSTR Enumerator, HWND hwndParent, DWORD Flags)
         {
             HDEVINFO ret;
 	lasterror_t lasterror;
+	HMODULE hSetupapi;
+	HDEVINFO (WINAPI *pSetupDiCreateDeviceInfoList)(const GUID *, HWND);
+	HDEVINFO forged;
 
 	ret = Old_SetupDiGetClassDevs(ClassGuid, Enumerator, hwndParent, Flags);
 
@@ -646,19 +803,17 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 	 * caller's validity guard passes and it advances into the enumeration
 	 * loop, where SetupDiEnumDeviceInfo supplies the device count. The empty
 	 * set is sufficient because that companion hook synthesizes entries when
-	 * the real enumeration returns FALSE. */
+	 * the real enumeration returns FALSE. lasterror is preserved around the
+	 * forged response. */
 	if (!g_config.no_stealth && ret == INVALID_HANDLE_VALUE) {
-		HMODULE hSetupapi;
-		mirage_SetupDiCreateDeviceInfoList_t pSetupDiCreateDeviceInfoList;
-
 		get_lasterrors(&lasterror);
 
 		hSetupapi = GetModuleHandleA("setupapi.dll");
 		if (hSetupapi != NULL) {
-			pSetupDiCreateDeviceInfoList = (mirage_SetupDiCreateDeviceInfoList_t)
+			pSetupDiCreateDeviceInfoList = (HDEVINFO (WINAPI *)(const GUID *, HWND))
 				GetProcAddress(hSetupapi, "SetupDiCreateDeviceInfoList");
 			if (pSetupDiCreateDeviceInfoList != NULL) {
-				HDEVINFO forged = pSetupDiCreateDeviceInfoList(ClassGuid, hwndParent);
+				forged = pSetupDiCreateDeviceInfoList(ClassGuid, hwndParent);
 				if (forged != INVALID_HANDLE_VALUE) {
 					ret = forged;
 					lasterror.Win32Error = ERROR_SUCCESS;
@@ -669,6 +824,9 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
+	LOQ_handle("misc", "iu", "Flags", Flags,
+		"Enumerator", Enumerator != NULL ? Enumerator : L"");
+
 	return ret;
         }
 
@@ -677,7 +835,7 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
             /* System32\winevt\Logs\System.evtx must appear present and larger
                than the sample's 20 MB (SYSTEM_EVTX_MIN_SIZE_BYTES) heuristic;
                forge a 25 MB size so the check reads a lived-in event log. */
-	static const wchar_t evtx_suffix[] = L"System.evtx";
+	static const wchar_t evtx_suffix[] = L"winevt\\Logs\\System.evtx";
 	BOOL ret;
 	lasterror_t lasterror;
 	WIN32_FILE_ATTRIBUTE_DATA *fileData;
@@ -686,7 +844,7 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 
 	ret = Old_GetFileAttributesExW(lpFileName, fInfoLevelId, lpFileInformation);
 
-	/* Samples probe System32\winevt\Logs\System.evtx via
+	/* Samples probe %WINDIR%\System32\winevt\Logs\System.evtx via
 	 * GetFileAttributesExW(GetFileExInfoStandard) and read the returned
 	 * WIN32_FILE_ATTRIBUTE_DATA size (nFileSizeHigh/nFileSizeLow): a missing
 	 * file, or one smaller than 20 MB (SYSTEM_EVTX_MIN_SIZE_BYTES,
@@ -694,11 +852,12 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 	 * the volume of System event-log data a long-lived real desktop would,
 	 * taking their sandbox-detected branch. A bare guest's System.evtx is
 	 * absent or tiny, so the real call either fails or reports a size well below
-	 * the threshold. When lpFileName ends with "System.evtx" and the caller
-	 * asked for the standard info level, force the file to look present and
-	 * 25 MB: overwrite nFileSizeHigh=0 and nFileSizeLow=26214400 (25 MB, above
-	 * the 20 MB threshold) and return TRUE so the sample classifies the host as
-	 * a genuine, long-used user machine and follows its non-evasive path. */
+	 * the threshold. When lpFileName ends with "winevt\Logs\System.evtx" and the
+	 * caller asked for the standard info level, force the file to look present
+	 * and 25 MB: overwrite nFileSizeHigh=0 and nFileSizeLow=26214400 (25 MB,
+	 * above the 20 MB threshold) and return TRUE so the sample classifies the
+	 * host as a genuine, long-used user machine and follows its non-evasive
+	 * path. lasterror is preserved around the forged response. */
 	if (!g_config.no_stealth && lpFileName != NULL &&
 			fInfoLevelId == GetFileExInfoStandard && lpFileInformation != NULL) {
 		name_len = wcslen(lpFileName);
@@ -725,6 +884,11 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		}
 	}
 
+	LOQ_bool("misc", "ui", "FileName", lpFileName != NULL ? lpFileName : L"",
+		"FileSizeLow",
+		(ret && lpFileInformation != NULL) ?
+			((WIN32_FILE_ATTRIBUTE_DATA *)lpFileInformation)->nFileSizeLow : 0);
+
 	return ret;
         }
 
@@ -732,7 +896,8 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
         {
             BOOL ret;
 	lasterror_t lasterror;
-	static unsigned int inspect_counter;
+	int forged;
+	unsigned int handle_hash;
 	TOKEN_MANDATORY_LABEL *label;
 	PUCHAR sub_count;
 	PDWORD last_sub;
@@ -741,8 +906,8 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		TokenInformation, TokenInformationLength, ReturnLength);
 
 	/* Samples fingerprint the sandbox by measuring process integrity levels:
-	 * for each process they inspect they call
-	 * GetTokenInformation(TokenIntegrityLevel), take the returned
+	 * they walk every process from CreateToolhelp32Snapshot, and for each one
+	 * call GetTokenInformation(TokenIntegrityLevel), take the returned
 	 * TOKEN_MANDATORY_LABEL, read the SID's last sub-authority via
 	 * GetSidSubAuthority (the integrity RID), and count a process as
 	 * low-integrity when that RID <= SECURITY_MANDATORY_LOW_RID (0x1000). They
@@ -755,25 +920,32 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 	 * Only the TokenIntegrityLevel class carries this signal, so we act on it
 	 * alone; after the real call succeeds, rewrite the returned label's SID so
 	 * its last sub-authority reads SECURITY_MANDATORY_LOW_RID (0x1000) for a
-	 * deterministic 1-in-8 slice of inspected tokens (> the required 5%). That
-	 * lifts lowIntegrityRatio above 0.05 while leaving the majority of tokens
-	 * reporting their genuine integrity, so the sample classifies the host as a
-	 * real user environment. */
+	 * deterministic >=5% slice of inspected tokens — those whose token-handle
+	 * hash is a multiple of 20 (1 in every 20 == 5%). Keying off the handle (not
+	 * a call counter) keeps the answer stable if the same token is queried more
+	 * than once, so a sample cannot spot a token flipping integrity between
+	 * reads. That lifts lowIntegrityRatio to/above 0.05 while leaving the
+	 * majority of tokens reporting their genuine integrity, so the sample
+	 * classifies the host as a real user environment. */
+	forged = 0;
 	if (!g_config.no_stealth && ret &&
 			TokenInformationClass == TokenIntegrityLevel &&
 			TokenInformation != NULL &&
 			TokenInformationLength >= sizeof(TOKEN_MANDATORY_LABEL)) {
 		get_lasterrors(&lasterror);
 
-		if ((inspect_counter++ % 8) == 0) {
+		handle_hash = (unsigned int)(((ULONG_PTR)TokenHandle) >> 2);
+		if ((handle_hash % 20) == 0) {
 			label = (TOKEN_MANDATORY_LABEL *)TokenInformation;
 			if (label->Label.Sid != NULL && IsValidSid(label->Label.Sid)) {
 				sub_count = GetSidSubAuthorityCount(label->Label.Sid);
 				if (sub_count != NULL && *sub_count > 0) {
 					last_sub = GetSidSubAuthority(label->Label.Sid,
 						(DWORD)(*sub_count - 1));
-					if (last_sub != NULL)
+					if (last_sub != NULL) {
 						*last_sub = SECURITY_MANDATORY_LOW_RID;
+						forged = 1;
+					}
 				}
 			}
 		}
@@ -781,82 +953,9 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
-	return ret;
-        }
-
-        HOOKDEF(BOOL, WINAPI, Process32Next, HANDLE hSnapshot, LPPROCESSENTRY32W lppe)
-        {
-            /* Analysis/monitoring/sandbox-helper image names to hide from the
-	       process walk. These are the names that inflate the high-integrity
-	       "successfullyInspectedProcesses" denominator: the CAPE host tooling
-	       (cape.exe, python.exe/pythonw.exe, the capemon-injected analyzer),
-	       Sandboxie service processes, and the usual monitoring/debugging
-	       utilities from the process_names_to_hide list. Matching is a
-	       case-insensitive compare against PROCESSENTRY32W.szExeFile. */
-	static const wchar_t *hide_names[] = {
-		L"cape.exe",
-		L"python.exe",
-		L"pythonw.exe",
-		L"analyzer.exe",
-		L"sandboxiedcomlaunch.exe",
-		L"sandboxierpcss.exe",
-		L"sbiesvc.exe",
-		L"procmon.exe",
-		L"procmon64.exe",
-		L"procexp.exe",
-		L"procexp64.exe",
-		L"x64dbg.exe",
-		L"x32dbg.exe",
-		L"ollydbg.exe",
-		L"windbg.exe",
-		L"idaq.exe",
-		L"idaq64.exe",
-		L"wireshark.exe",
-		L"fiddler.exe",
-		L"vmtoolsd.exe",
-		L"vboxservice.exe",
-		L"vboxtray.exe",
-	};
-	BOOL ret;
-	unsigned int i;
-	unsigned int n;
-	int is_hidden;
-
-	ret = Old_Process32Next(hSnapshot, lppe);
-
-	/* Samples build the set of running processes from
-	 * CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS) and walk it with
-	 * Process32Next, then inspect each process token's integrity level to
-	 * compute lowIntegrityProcessCount / successfullyInspectedProcesses. The
-	 * analysis/sandbox helper processes above run at (or are counted as) high
-	 * integrity, so leaving them in the walk inflates the denominator of that
-	 * ratio and, together with a forged high-integrity own-token, pushes the
-	 * ratio toward the "no low-integrity browser/user processes -> bare
-	 * sandbox" verdict. Filter those helper entries out of the returned
-	 * PROCESSENTRY32W by advancing to the next non-analysis entry: whenever the
-	 * genuine Process32Next hands back a hidden image name, transparently call
-	 * the original again until a real, non-analysis process (or the genuine
-	 * end-of-enumeration) is reached. Only the high-integrity denominator
-	 * shrinks; the low-integrity SIDs the numerator is built from are ordinary
-	 * user processes and pass through untouched, complementing the
-	 * GetTokenInformation forge. */
-	if (!g_config.no_stealth && lppe != NULL) {
-		n = sizeof(hide_names) / sizeof(hide_names[0]);
-		is_hidden = 1;
-
-		while (ret && is_hidden) {
-			is_hidden = 0;
-			for (i = 0; i < n; i++) {
-				if (_wcsicmp(lppe->szExeFile, hide_names[i]) == 0) {
-					is_hidden = 1;
-					break;
-				}
-			}
-
-			if (is_hidden)
-				ret = Old_Process32Next(hSnapshot, lppe);
-		}
-	}
+	LOQ_bool("registry", "iii", "TokenInformationClass", TokenInformationClass,
+		"TokenInformationLength", TokenInformationLength,
+		"ForgedLowIntegrity", forged);
 
 	return ret;
         }
@@ -922,6 +1021,9 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		}
 	}
 
+	LOQ_bool("misc", "i", "ProcessCount",
+		lpcbNeeded != NULL ? (*lpcbNeeded / (DWORD)sizeof(DWORD)) : 0);
+
 	return ret;
         }
 
@@ -938,10 +1040,10 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
                subset of 12 service paths drives the observed non-system count
                past the < 10 threshold with a comfortable margin. */
 		static const unsigned int MIRAGE_NONSYS_SVC_TARGET = 12;
-		/* Plausible vendor path under Program Files\Common Files; a static,
-		   NUL-terminated buffer so we can retarget lpBinaryPathName at it
-		   without disturbing the caller's output buffer or its size. */
-		static char forced_path[] = "C:\\Program Files\\Common Files\\VendorSvc\\service.exe";
+		/* Plausible vendor path under Program Files; a static, NUL-terminated
+		   buffer so we can retarget lpBinaryPathName at it without disturbing
+		   the caller's output buffer or its reported size. */
+		static char forced_path[] = "C:\\Program Files\\CommonVendor\\service.exe";
 		static unsigned int g_mirage_svc_rewritten;
 		BOOL ret;
 		lasterror_t lasterror;
@@ -952,15 +1054,16 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		 * with ERROR_INSUFFICIENT_BUFFER and reports the required size in
 		 * *pcbBytesNeeded, and only the successful data pass fills
 		 * lpServiceConfig. On that successful pass, point lpBinaryPathName at our
-		 * static Program Files\Common Files\VendorSvc path so the sample's
-		 * per-service directory check tallies this service as non-system. We do
-		 * this for the first MIRAGE_NONSYS_SVC_TARGET (12) services observed and
-		 * then leave every later service's real path intact — a subset is enough
-		 * to push nonSystemServiceCount past the < 10 threshold, and because we
-		 * only redirect the pointer (rather than growing the string in place) the
+		 * static Program Files\CommonVendor path so the sample's per-service
+		 * directory check tallies this service as non-system. We do this for the
+		 * first MIRAGE_NONSYS_SVC_TARGET (12) services observed and then leave
+		 * every later service's real path intact — a subset is enough to push
+		 * nonSystemServiceCount past the < 10 threshold, and because we only
+		 * redirect the pointer (rather than growing the string in place) the
 		 * caller's buffer and *pcbBytesNeeded stay valid. Once 12 have been
 		 * rewritten the check already reads as a genuine user machine, so
-		 * checkCondition() classifies the host as a real environment. */
+		 * checkCondition() classifies the host as a real environment. lasterror
+		 * is preserved around the forged response. */
 		if (!g_config.no_stealth && ret && lpServiceConfig != NULL &&
 				g_mirage_svc_rewritten < MIRAGE_NONSYS_SVC_TARGET) {
 			get_lasterrors(&lasterror);
@@ -970,6 +1073,10 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 
 			set_lasterrors(&lasterror);
 		}
+
+		LOQ_bool("registry", "s", "BinaryPathName",
+			(ret && lpServiceConfig != NULL && lpServiceConfig->lpBinaryPathName != NULL) ?
+				lpServiceConfig->lpBinaryPathName : "");
 
 		return ret;
         }
@@ -992,8 +1099,20 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		"DropboxUpdateService",
 		"BraveElevationService",
 		"ZoomCptService",
+		"EpicOnlineServices",
+		"DiscordUpdateService",
+		"LenovoVantageService",
+		"DellClientManagement",
+		"NahimicService",
+		"KillerNetworkService",
+		"LogiRegistryService",
+		"RazerCentralService",
+		"CorsairService",
+		"MalwarebytesService",
+		"TeamViewerService",
+		"WacomTabletService",
 	};
-	#define MIRAGE_SVC_FORCED_COUNT 12
+	#define MIRAGE_SVC_FORCED_COUNT 24
 	BOOL ret;
 	lasterror_t lasterror;
 	DWORD fake_total;
@@ -1079,8 +1198,108 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
+	LOQ_bool("registry", "i", "ServicesReturned",
+		lpServicesReturned != NULL ? *lpServicesReturned : 0);
+
 	return ret;
         }
+
+    HOOKDEF(DWORD, WINAPI, CertGetNameString, PCCERT_CONTEXT pCertContext, DWORD dwType, DWORD dwFlags, void *pvTypePara, LPSTR pszNameString, DWORD cchNameString)
+    {
+        /* CERT_NAME_ISSUER_FLAG selects the certificate's issuer (rather than
+   subject) name; guarded in case the wincrypt headers this TU sees predate
+   it. */
+#ifndef CERT_NAME_ISSUER_FLAG
+#define CERT_NAME_ISSUER_FLAG 0x1
+#endif
+/* Rotating pool of plausible, genuinely third-party (non-Microsoft)
+   code-signing CA common names. The forced value (DigiCert ...) leads the
+   pool; Sectigo / GlobalSign / Google / Adobe follow so the forged issuer
+   set is diverse enough to clear the sample's distinct-non-MS-issuer floor
+   as well as its Microsoft-dominance ratio. IsMicrosoftIssuer() matches none
+   of these. */
+static const char *mirage_cert_issuers[] = {
+    "DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1",
+    "Sectigo Public Code Signing CA R36",
+    "GlobalSign GCC R45 CodeSigning CA 2020",
+    "Google Trust Services LLC",
+    "Adobe Product Services G3",
+};
+static unsigned int g_mirage_cert_issuer_calls;
+static unsigned int g_mirage_cert_forge_index;
+DWORD ret;
+lasterror_t lasterror;
+const char *forced;
+DWORD issuer_total;
+DWORD required;
+
+ret = Old_CertGetNameString(pCertContext, dwType, dwFlags, pvTypePara,
+    pszNameString, cchNameString);
+
+/* Samples enumerate each Win32 service, resolve its backing executable
+ * image, and read that image's Authenticode issuer common name via
+ * CertGetNameString(..., CERT_NAME_ISSUER_FLAG, ...). They feed the issuer
+ * string to IsMicrosoftIssuer() and tally microsoft_ratio (fraction of
+ * service images signed under a Microsoft issuer), the number of distinct
+ * non-Microsoft issuers, and the count of non-Microsoft-signed images. A
+ * freshly-imaged analysis VM runs almost exclusively stock, Microsoft-signed
+ * services, so microsoft_ratio saturates near 1.0 while distinct_non_ms and
+ * non_ms_signed_count stay near zero — the shape the sample flags as a
+ * sandbox (microsoft_ratio >= 0.80 AND distinct_non_ms_issuers < 3 AND
+ * non_ms_signed_count < 5). For a portion of issuer-name reads, overwrite the
+ * returned string with a rotating third-party CA issuer (DigiCert / Sectigo /
+ * GlobalSign / Google / Adobe) so the observed Microsoft-dominance ratio
+ * falls below 0.80 and the non-MS issuer diversity/count rise past their
+ * floors, breaking the detection conjunction. Only issuer reads (dwFlags &
+ * CERT_NAME_ISSUER_FLAG) are touched; subject-name reads and every other
+ * query pass through untouched. CertGetNameString is a two-pass API (a NULL
+ * or zero-length buffer returns the required character count, including the
+ * terminating NUL), so both phases are honored. lasterror is preserved around
+ * the forged response. */
+if (!g_config.no_stealth && (dwFlags & CERT_NAME_ISSUER_FLAG)) {
+    issuer_total = (DWORD)(sizeof(mirage_cert_issuers) /
+        sizeof(mirage_cert_issuers[0]));
+
+    /* forge three of every four issuer reads, letting the fourth pass
+       through genuine: enough forged non-MS issuers to drive
+       microsoft_ratio well below 0.80 and raise the distinct-issuer/count
+       tallies past their floors, while leaving some authentic reads
+       intact */
+    if ((g_mirage_cert_issuer_calls % 4) != 3) {
+        get_lasterrors(&lasterror);
+
+        forced = mirage_cert_issuers[g_mirage_cert_forge_index % issuer_total];
+        g_mirage_cert_forge_index++;
+
+        required = (DWORD)(strlen(forced) + 1);
+
+        if (pszNameString == NULL || cchNameString == 0) {
+            /* sizing pass: report the character count the forged issuer
+               needs (including the terminating NUL) */
+            ret = required;
+        } else if (cchNameString >= required) {
+            memcpy(pszNameString, forced, required);
+            ret = required;
+        } else {
+            /* buffer too small: copy what fits and NUL-terminate, matching
+               CertGetNameString's copy-what-fits behavior */
+            memcpy(pszNameString, forced, cchNameString - 1);
+            pszNameString[cchNameString - 1] = '\0';
+            ret = cchNameString;
+        }
+
+        set_lasterrors(&lasterror);
+    }
+
+    g_mirage_cert_issuer_calls++;
+}
+
+LOQ_nonzero("misc", "iis", "Type", (int)dwType, "Flags", (int)dwFlags,
+    "NameString",
+    (pszNameString != NULL && cchNameString > 0) ? pszNameString : "");
+
+return ret;
+    }
 
         HOOKDEF(BOOL, WINAPI, ProcessIdToSessionId, DWORD dwProcessId, DWORD *pSessionId)
         {
@@ -1089,21 +1308,20 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 
 	ret = Old_ProcessIdToSessionId(dwProcessId, pSessionId);
 
-	/* Samples enumerate every running PID, resolve each one's session with
-	 * ProcessIdToSessionId, and compare it against the active console
-	 * session (WTSGetActiveConsoleSessionId, typically 1). They compute
-	 * sameSessionRatio = (processes whose SessionId == console session) /
-	 * (processes with a resolvable SessionId): a low ratio (< 0.10) means
-	 * most processes live in other sessions — the shape of a real
-	 * multi-session workstation with services in session 0 — whereas a
-	 * freshly-imaged analysis VM tends to run almost everything in the
-	 * single interactive console session. This particular check inverts the
-	 * usual polarity: it flags a *low* ratio as sandbox and a *high* one
-	 * (>= 0.30) as a genuine user host. Force *pSessionId to the active
-	 * console session id (1) for every queried PID so sameSessionProcesses
-	 * equals totalProcesses and sameSessionRatio saturates at 1.0, clearing
-	 * the >= 0.30 threshold and classifying the host as a user
-	 * environment. */
+	/* Samples enumerate every running PID from the toolhelp snapshot, resolve
+	 * each one's session with ProcessIdToSessionId, and compare it against the
+	 * active console session (WTSGetActiveConsoleSessionId, typically 1). They
+	 * count a process as same-session only when processSessionId ==
+	 * consoleSessionId and compute sameSessionRatio = sameSessionProcesses /
+	 * totalProcesses. This check treats a low ratio (< 0.30) as a sandbox and a
+	 * high one (>= 0.30) as a genuine, single-user interactive workstation.
+	 * A freshly-imaged analysis VM may spread its processes across session 0
+	 * (services) and other sessions, so the ratio can fall below the threshold
+	 * and the sample takes its sandbox-detected branch. Force *pSessionId to the
+	 * active console session id (1) for every queried PID so sameSessionProcesses
+	 * == totalProcesses and sameSessionRatio saturates at 1.0, landing well above
+	 * the 0.30 user-environment threshold and classifying the host as a real
+	 * user environment. lasterror is preserved around the forged response. */
 	if (!g_config.no_stealth && ret && pSessionId != NULL) {
 		get_lasterrors(&lasterror);
 
@@ -1111,6 +1329,9 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 
 		set_lasterrors(&lasterror);
 	}
+
+	LOQ_bool("misc", "ii", "ProcessId", dwProcessId,
+		"SessionId", pSessionId != NULL ? *pSessionId : 0);
 
 	return ret;
         }
@@ -1132,7 +1353,8 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 	 * probe never hits the 0xFFFFFFFF fallback-to-sandbox path; this also
 	 * matches the console session forged into the ProcessIdToSessionId hook,
 	 * so the two views of the active session stay consistent and the host
-	 * reads as a genuine user environment. */
+	 * reads as a genuine user environment. lasterror is preserved around the
+	 * forged response. */
 	if (!g_config.no_stealth) {
 		get_lasterrors(&lasterror);
 
@@ -1140,6 +1362,144 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 
 		set_lasterrors(&lasterror);
 	}
+
+	LOQ_void("misc", "i", "SessionId", ret);
+
+	return ret;
+        }
+
+        HOOKDEF(BOOL, WINAPI, Process32Next, HANDLE hSnapshot, LPPROCESSENTRY32 lppe)
+        {
+            /* Analysis/monitoring/sandbox-helper image names to hide from the
+	       process walk. These are the names that inflate the high-integrity
+	       "successfullyInspectedProcesses" denominator: the CAPE host tooling
+	       (cape.exe, python.exe/pythonw.exe, the capemon-injected analyzer),
+	       Sandboxie service processes, and the usual monitoring/debugging
+	       utilities from the process_names_to_hide list. Matching is a
+	       case-insensitive compare against PROCESSENTRY32.szExeFile. */
+	static const char *hide_names[] = {
+		"cape.exe",
+		"python.exe",
+		"pythonw.exe",
+		"analyzer.exe",
+		"sandboxiedcomlaunch.exe",
+		"sandboxierpcss.exe",
+		"sbiesvc.exe",
+		"procmon.exe",
+		"procmon64.exe",
+		"procexp.exe",
+		"procexp64.exe",
+		"x64dbg.exe",
+		"x32dbg.exe",
+		"ollydbg.exe",
+		"windbg.exe",
+		"idaq.exe",
+		"idaq64.exe",
+		"wireshark.exe",
+		"fiddler.exe",
+		"vmtoolsd.exe",
+		"vboxservice.exe",
+		"vboxtray.exe",
+	};
+	BOOL ret;
+	lasterror_t lasterror;
+	unsigned int i;
+	unsigned int n;
+	int is_hidden;
+
+	ret = Old_Process32Next(hSnapshot, lppe);
+
+	/* Samples build the set of running processes from
+	 * CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS) and walk it with
+	 * Process32Next, then inspect each process token's integrity level to
+	 * compute lowIntegrityProcessCount / successfullyInspectedProcesses. The
+	 * analysis/sandbox helper processes above run at (or are counted as) high
+	 * integrity, so leaving them in the walk inflates the denominator of that
+	 * ratio and, together with a forged high-integrity own-token, pushes the
+	 * ratio toward the "no low-integrity browser/user processes -> bare
+	 * sandbox" verdict. Filter those helper entries out of the returned
+	 * PROCESSENTRY32 by advancing to the next non-analysis entry: whenever the
+	 * genuine Process32Next hands back a hidden image name, transparently call
+	 * the original again until a real, non-analysis process (or the genuine
+	 * end-of-enumeration) is reached. This also keeps foreign-session helper
+	 * processes out of the snapshot so they cannot depress the same-session
+	 * ratio. Only the high-integrity denominator shrinks; the low-integrity
+	 * SIDs the numerator is built from are ordinary user processes and pass
+	 * through untouched, complementing the GetTokenInformation and
+	 * ProcessIdToSessionId forges. lasterror is preserved around the forged
+	 * response. */
+	if (!g_config.no_stealth && lppe != NULL) {
+		get_lasterrors(&lasterror);
+
+		n = sizeof(hide_names) / sizeof(hide_names[0]);
+		is_hidden = 1;
+
+		while (ret && is_hidden) {
+			is_hidden = 0;
+			for (i = 0; i < n; i++) {
+				if (_stricmp(lppe->szExeFile, hide_names[i]) == 0) {
+					is_hidden = 1;
+					break;
+				}
+			}
+
+			if (is_hidden)
+				ret = Old_Process32Next(hSnapshot, lppe);
+		}
+
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_bool("misc", "s", "ProcessName",
+		(ret && lppe != NULL) ? lppe->szExeFile : "");
+
+	return ret;
+        }
+
+        HOOKDEF(BOOL, WINAPI, QueryPerformanceFrequency, LARGE_INTEGER *lpFrequency)
+        {
+            /* Stable, plausible performance-counter frequency (10 MHz). This is the
+	   divisor the sample uses to convert QueryPerformanceCounter deltas into
+	   microseconds; forcing a fixed, round value keeps that conversion coherent
+	   with the forged QPC deltas produced by the companion QueryPerformanceCounter
+	   hook. 10 MHz is a common QPC rate on real hardware, so the reported
+	   frequency stays unremarkable. */
+	#define MIRAGE_QPF_FORCED_FREQ 10000000ll
+	BOOL ret;
+	lasterror_t lasterror;
+
+	ret = Old_QueryPerformanceFrequency(lpFrequency);
+
+	/* Samples time an inter-thread ping-pong (or similar tight latency probe) by
+	 * bracketing each round-trip with two QueryPerformanceCounter reads, then
+	 * convert the (end - start) tick delta into microseconds by dividing by the
+	 * counter frequency this API returns: latency_us = delta_ticks * 1e6 / freq.
+	 * They aggregate the per-iteration microsecond latencies into a mean and
+	 * standard deviation and flag the host as an instrumented/contended analysis
+	 * VM when those statistics exceed their floors (e.g. mean > 200us AND
+	 * stddev > 300us). The companion QueryPerformanceCounter hook already forges
+	 * each bracketed delta to a tiny, fixed ~50us-worth of ticks, but that step is
+	 * derived as freq * 50 / 1e6, so the microsecond value the sample recovers is
+	 * only coherent if the frequency it divides by here matches the frequency the
+	 * counter hook used. Report a stable 10 MHz (10,000,000 Hz) frequency so the
+	 * divisor is fixed and consistent with those forged deltas: the recovered
+	 * per-iteration latency stays a constant ~50us (well under the 200us mean
+	 * floor) with effectively zero variance (well under the 300us stddev floor),
+	 * so both conditions are false and the environment classifies as a genuine
+	 * low-latency host. A stable frequency also avoids exposing a second-order
+	 * rate/counter mismatch between the two APIs. lasterror is preserved around
+	 * the forged response. */
+	if (!g_config.no_stealth && lpFrequency != NULL) {
+		get_lasterrors(&lasterror);
+
+		lpFrequency->QuadPart = MIRAGE_QPF_FORCED_FREQ;
+		ret = TRUE;
+
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_bool("misc", "i", "Frequency",
+		lpFrequency != NULL ? (int)lpFrequency->LowPart : 0);
 
 	return ret;
         }
@@ -1180,17 +1540,25 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 			if (elapsed < (ULONGLONG)dwMilliseconds) {
 				Sleep((DWORD)((ULONGLONG)dwMilliseconds - elapsed));
 			}
+			/* report a fully-consumed wait: FALSE with ERROR_TIMEOUT
+			   (1460), returned only after the padded delay so the
+			   bracketing GetTickCount64 reads stay consistent */
+			ret = FALSE;
+			lasterror.Win32Error = ERROR_TIMEOUT;
 		}
 
 		set_lasterrors(&lasterror);
 	}
+
+	LOQ_bool("misc", "ii", "Timeout", dwMilliseconds, "Signalled", ret);
 
 	return ret;
         }
 
         HOOKDEF(void, WINAPI, GetSystemTimePreciseAsFileTime, LPFILETIME lpSystemTimeAsFileTime)
         {
-            lasterror_t lasterror;
+            int ret = 0;
+	lasterror_t lasterror;
 	ULARGE_INTEGER u;
 
 	Old_GetSystemTimePreciseAsFileTime(lpSystemTimeAsFileTime);
@@ -1227,6 +1595,9 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 		set_lasterrors(&lasterror);
 	}
 
+	LOQ_void("misc", "i", "SystemTimeAsFileTime",
+		lpSystemTimeAsFileTime != NULL ? (int)lpSystemTimeAsFileTime->dwLowDateTime : 0);
+
 	return;
         }
 
@@ -1243,16 +1614,19 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 	 * then non-blocking-poll both the worker-thread handle and the event
 	 * handle with WaitForSingleObject(handle, 0). On a real host the thread
 	 * is still parked and the event still unsignalled, so both 0-ms polls
-	 * return WAIT_TIMEOUT (0x102). A sandbox that shortcuts or breaks
-	 * blocking waits to accelerate analysis lets the worker's INFINITE wait
-	 * complete, signalling the thread handle so the poll returns
-	 * WAIT_OBJECT_0 (0) — the tell the sample looks for. Force every
-	 * non-blocking poll (dwMilliseconds == 0) to report WAIT_TIMEOUT so both
-	 * the thread and the event read as still-blocked/unsignalled. Genuine
-	 * INFINITE (0xFFFFFFFF) waits are deliberately passed through untouched:
-	 * substituting a finite timeout there would let the worker's INFINITE
-	 * wait return, signal the thread handle, and expose the sandbox on the
-	 * very poll this forge exists to neutralise. lasterror is preserved. */
+	 * return WAIT_TIMEOUT (0x102) and isUserEnvironment stays true. A sandbox
+	 * that shortcuts or breaks blocking waits to accelerate analysis lets the
+	 * worker's INFINITE wait complete, signalling the thread handle so the
+	 * poll returns WAIT_OBJECT_0 (0) — the tell the sample reads as proof the
+	 * sandbox forcibly shortened/unblocked the genuine INFINITE wait, flipping
+	 * isUserEnvironment to false. Force every non-blocking poll
+	 * (dwMilliseconds == 0) to report WAIT_TIMEOUT (0x102) so both the
+	 * worker-thread and event polls read 'still blocked, still unsignalled'.
+	 * Genuine INFINITE (0xFFFFFFFF) waits are deliberately passed straight
+	 * through to the real API untouched: substituting a finite timeout there
+	 * would let the worker's INFINITE wait return, signal the thread handle,
+	 * and expose the sandbox on the very poll this forge exists to
+	 * neutralise. lasterror is preserved around the forged response. */
 	if (!g_config.no_stealth && dwMilliseconds == 0 && ret != WAIT_TIMEOUT) {
 		get_lasterrors(&lasterror);
 
@@ -1260,6 +1634,8 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 
 		set_lasterrors(&lasterror);
 	}
+
+	LOQ_msgwait("misc", "pi", "Handle", hHandle, "Milliseconds", dwMilliseconds);
 
 	return ret;
         }
@@ -1289,11 +1665,16 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 	 * requested duration so the GetTickCount64 delta equals dwMilliseconds and
 	 * the ratio sits at ~1.0. If the underlying dequeue timed out early
 	 * (ret == FALSE with WAIT_TIMEOUT) on a finite, non-zero timeout, pad the
-	 * remaining time with a real Sleep so the observed elapsed time matches
-	 * the requested timeout, then return FALSE with GetLastError() ==
-	 * WAIT_TIMEOUT so the correct error code is observed and the spurious
-	 * completion (return/no-packet) trigger is avoided. A genuine completion
-	 * packet (ret != FALSE) is passed straight through untouched. */
+	 * remaining time with a real Sleep so the observed elapsed time genuinely
+	 * matches the requested timeout (never fast-forwarded/skipped), then leave
+	 * the completion out-params untouched and return FALSE with GetLastError()
+	 * == WAIT_TIMEOUT so both the measured GetTickCount64 delta and the error
+	 * code match real host behavior and the spurious completion trigger is
+	 * avoided. Blocking for real also keeps the sample's own GetTickCount64
+	 * readings correct even when that call resolves to a direct
+	 * KUSER_SHARED_DATA read the monitor never sees. A genuine completion
+	 * packet (ret != FALSE) is passed straight through untouched. lasterror is
+	 * preserved around the forged response. */
 	if (!g_config.no_stealth && !ret && dwMilliseconds != 0 &&
 			dwMilliseconds != INFINITE) {
 		get_lasterrors(&lasterror);
@@ -1303,421 +1684,233 @@ typedef HDEVINFO (WINAPI *mirage_SetupDiCreateDeviceInfoList_t)(
 			if (elapsed < (ULONGLONG)dwMilliseconds) {
 				Sleep((DWORD)((ULONGLONG)dwMilliseconds - elapsed));
 			}
+			/* report a fully-consumed empty-port wait: FALSE with
+			   WAIT_TIMEOUT (0x102), returned only after the padded delay so
+			   the bracketing GetTickCount64 reads stay consistent */
+			ret = FALSE;
+			lasterror.Win32Error = WAIT_TIMEOUT;
 		}
 
 		set_lasterrors(&lasterror);
 	}
 
-	return ret;
-        }
-
-        HOOKDEF(BOOL, WINAPI, QueryPerformanceCounter, LARGE_INTEGER *lpPerformanceCount)
-        {
-            BOOL ret;
-	lasterror_t lasterror;
-	LARGE_INTEGER freq;
-
-	ret = Old_QueryPerformanceCounter(lpPerformanceCount);
-
-	/* Companion to the NtDelayExecution / GetTickCount64 timing model, on the
-	 * high-resolution performance-counter path. Samples bracket a long sleep
-	 * (e.g. Sleep(300000)) with two QueryPerformanceCounter reads, take
-	 * QueryPerformanceFrequency, and compute the elapsed time from the counter
-	 * delta: elapsedMs = (counterAfter - counterBefore) * 1000 / frequency.
-	 * They then form elapsedRatio = measuredElapsedMs / requestedSleepMs and
-	 * flag the host when the ratio drops below 0.95 — the signature of a
-	 * sandbox that fast-forwards blocking sleeps, since the shortcut Sleep()
-	 * returns early and the counter barely moves. capemon accumulates every
-	 * millisecond it shortcuts from a blocking/sleeping call into the shared
-	 * time_skipped counter (in milliseconds); convert that accrued skew to
-	 * performance-counter ticks (frequency * skippedMs / 1000) and add it to
-	 * the returned value so the counter timeline advances by the full duration
-	 * the caller believes elapsed. The post-Sleep read of a bracketed 300000 ms
-	 * delay then sits frequency*300000/1000 ticks above the pre-Sleep read
-	 * (counterAfter.QuadPart == counterBefore.QuadPart +
-	 * frequency.QuadPart * kRequestedSleepMs / 1000), so the measured delta
-	 * equals ~100% of the requested duration and elapsedRatio stays >= 0.95.
-	 * Using the shared time_skipped keeps this QPC view advancing by the same
-	 * amount as the tick-based views (GetTickCount64 et al.), so the forged
-	 * timeline stays internally consistent. lasterror is preserved. */
-	if (!g_config.no_stealth && ret && lpPerformanceCount != NULL &&
-			time_skipped.QuadPart != 0) {
-		get_lasterrors(&lasterror);
-
-		freq.QuadPart = 0;
-		QueryPerformanceFrequency(&freq);
-
-		if (freq.QuadPart > 0)
-			lpPerformanceCount->QuadPart +=
-				freq.QuadPart * (LONGLONG)time_skipped.QuadPart / 1000LL;
-
-		set_lasterrors(&lasterror);
-	}
+	LOQ_bool("misc", "pii", "CompletionPort", CompletionPort,
+		"Milliseconds", dwMilliseconds,
+		"NumberOfBytesTransferred",
+		lpNumberOfBytesTransferred != NULL ? *lpNumberOfBytesTransferred : 0);
 
 	return ret;
         }
 
-        HOOKDEF(VOID, WINAPI, QueryUnbiasedInterruptTimePrecise, PULONGLONG lpUnbiasedInterruptTime)
+        HOOKDEF(int, WINAPI, MessageBoxA, HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType)
         {
-            lasterror_t lasterror;
-
-	Old_QueryUnbiasedInterruptTimePrecise(lpUnbiasedInterruptTime);
-
-	/* Companion to the NtDelayExecution / GetTickCount64 timing model, on the
-	 * unbiased-interrupt-time path. Samples run two loops that perform the same
-	 * total amount of sleeping but poll this timer at different rates: a
-	 * high-frequency polling loop (Sleep(1) x 2000, sampling the unbiased
-	 * interrupt time inside the tight loop) and a low-frequency loop that sleeps
-	 * the same total but samples far less often. They measure highDurationMs_ and
-	 * lowDurationMs_ from the QueryUnbiasedInterruptTimePrecise deltas and flag
-	 * the host when highDurationMs_ / lowDurationMs_ > 1.5. Unlike GetTickCount64's
-	 * KUSER_SHARED_DATA read, this timer is resolved via GetProcAddress from
-	 * kernel32 (a real export), so a hook here is seen. A sandbox that fast-
-	 * forwards the many Sleep(1) calls in the high-frequency loop skews only that
-	 * loop's measured duration, pushing the ratio above 1.5. capemon accumulates
-	 * every millisecond it shortcuts from a blocking/sleeping call into the shared
-	 * time_skipped counter, so advancing the returned unbiased interrupt time by
-	 * that accrued skew (milliseconds converted to 100ns units) makes the timer
-	 * advance by the full duration the caller believes elapsed, at an identical
-	 * rate regardless of how frequently either loop polls. Both loops sleep the
-	 * same total, so both accrue the same skipped time and their measured
-	 * durations stay equal (highDurationMs_ ~ lowDurationMs_), driving the ratio
-	 * back to ~1.0 below the 1.5 threshold. Using the shared time_skipped keeps
-	 * this view advancing by the same amount as the tick-based views
-	 * (GetTickCount64 et al.), so the forged timeline stays internally consistent.
-	 * lasterror is preserved. */
-	if (!g_config.no_stealth && lpUnbiasedInterruptTime != NULL) {
-		get_lasterrors(&lasterror);
-
-		*lpUnbiasedInterruptTime += (ULONGLONG)time_skipped.QuadPart * 10000ull;
-
-		set_lasterrors(&lasterror);
-	}
-
-	return;
-        }
-
-        HOOKDEF(BOOL, WINAPI, QueryUnbiasedInterruptTime, PULONGLONG UnbiasedTime)
-        {
-            BOOL ret;
+            /* The sample's own TIMEOUT_CODE: the value its message-box wrapper
+	 * yields when the dialog was left untouched until a forced timeout,
+	 * i.e. no button was ever clicked. */
+	#define MIRAGE_MSGBOX_TIMEOUT_CODE 2
+	int ret;
 	lasterror_t lasterror;
 
-	ret = Old_QueryUnbiasedInterruptTime(UnbiasedTime);
-
-	/* Fallback timer the sample resolves via GetProcAddress from kernel32
-	 * when the *Precise variant is absent (older Windows builds), so a hook
-	 * on the precise export alone would be bypassed here. The evasion is the
-	 * same as the QueryUnbiasedInterruptTimePrecise companion: samples run
-	 * two loops that perform the same total amount of sleeping but poll this
-	 * timer at different rates — a high-frequency loop (Sleep(1) x 2000,
-	 * sampling the unbiased interrupt time inside the tight loop) and a
-	 * low-frequency loop that sleeps the same total but samples far less
-	 * often — measure highDurationMs_ and lowDurationMs_ from the unbiased
-	 * interrupt-time deltas, and flag the host when
-	 * highDurationMs_ / lowDurationMs_ > 1.5. A sandbox that fast-forwards
-	 * the many Sleep(1) calls in the high-frequency loop skews only that
-	 * loop's measured duration, pushing the ratio above 1.5. Hook this
-	 * fallback identically to the precise variant so the ratio measured
-	 * through either API path stays ~1.0: capemon accumulates every
-	 * millisecond it shortcuts from a blocking/sleeping call into the shared
-	 * time_skipped counter, so advancing the returned unbiased interrupt time
-	 * by that accrued skew (milliseconds converted to 100ns units) makes the
-	 * timer advance by the full duration the caller believes elapsed, at an
-	 * identical rate regardless of how frequently either loop polls. Both
-	 * loops sleep the same total, so both accrue the same skipped time and
-	 * their measured durations stay equal (highDurationMs_ ~ lowDurationMs_),
-	 * driving the ratio back below the 1.5 threshold. The forged value is the
-	 * same monotonic 100ns figure the precise hook reports, keeping the two
-	 * API paths consistent with each other and with the tick-based views
-	 * (GetTickCount64 et al.). Report TRUE (success) and preserve lasterror. */
-	if (!g_config.no_stealth && UnbiasedTime != NULL) {
+	/* Samples use a MessageBoxA return value as a proxy for UI interaction
+	 * to tell an automated sandbox from a patient human user. They pop a
+	 * dialog and read the result: any button click (IDOK/IDCANCEL/...) means
+	 * someone/something dismissed it, and because a sandbox's UI auto-clicker
+	 * dismisses dialogs instantly they treat return != IDTIMEOUT as an
+	 * "automated/test environment", whereas a real, patient user leaves the
+	 * dialog untouched until it times out. The transparent answer is to
+	 * emulate that patient user who never interacts: do NOT call the original
+	 * MessageBoxA (which would actually display the dialog and let CAPE's UI
+	 * auto-clicker dismiss it early, producing a button code), and instead
+	 * unconditionally return the sample's TIMEOUT_CODE (2) so the dialog reads
+	 * as having timed out with no interaction. That steers the sample into its
+	 * executeTaskRoutine() 'user environment' branch; skipping the original
+	 * call also suppresses CAPE's auto-clicker for this dialog, since no window
+	 * is ever shown. lasterror is preserved around the forged response. */
+	if (!g_config.no_stealth) {
 		get_lasterrors(&lasterror);
 
-		*UnbiasedTime += (ULONGLONG)time_skipped.QuadPart * 10000ull;
-		ret = TRUE;
+		ret = MIRAGE_MSGBOX_TIMEOUT_CODE;
 
 		set_lasterrors(&lasterror);
+	} else {
+		ret = Old_MessageBoxA(hWnd, lpText, lpCaption, uType);
 	}
+
+	LOQ_nonzero("window", "ssi", "Text", lpText != NULL ? lpText : "",
+		"Caption", lpCaption != NULL ? lpCaption : "",
+		"Type", uType);
 
 	return ret;
         }
 
-HOOKDEF(int, WINAPI, MessageBoxA, HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType)
-{
-    /* The sample's own TIMEOUT_CODE: the value its message-box wrapper
-     * yields when the dialog was left untouched until a forced timeout,
-     * i.e. no button was ever clicked. */
-    #define MIRAGE_MSGBOX_TIMEOUT_CODE 2
-    int ret;
-    lasterror_t lasterror;
+    HOOKDEF(BOOL, WINAPI, GetGUIThreadInfo, DWORD idThread, LPGUITHREADINFO lpgui)
+    {
+        /* GUI_CARETBLINKING marks the queried thread's caret as present and
+ * blinking; define it locally in case the SDK headers this TU sees
+ * predate it. */
+#ifndef GUI_CARETBLINKING
+#define GUI_CARETBLINKING 0x00000001
+#endif
+/* Monotonic call counter driving the synthetic caret's motion so
+ * successive successful samples observe a caret that keeps moving. */
+static unsigned int mirage_caret_tick;
+BOOL ret;
+lasterror_t lasterror;
+HWND caret_hwnd;
+LONG dx;
+LONG dy;
 
-    /* Samples use a MessageBoxA return value as a proxy for UI
-     * interaction to tell an automated sandbox from a patient human
-     * user. They pop a dialog and read the result: any button click
-     * (IDOK/IDCANCEL/...) means someone/something dismissed it, and
-     * because a sandbox's UI auto-clicker dismisses dialogs instantly
-     * they treat return != IDTIMEOUT as "automated/test environment",
-     * whereas a real, patient user leaves the dialog untouched until it
-     * times out. The transparent answer is to emulate that patient user
-     * who never interacts: do NOT call the original MessageBoxA (which
-     * would actually display the dialog and let CAPE's UI auto-clicker
-     * dismiss it early, producing a button code), and instead
-     * unconditionally return the sample's TIMEOUT_CODE (2) so the dialog
-     * reads as having timed out with no interaction. That steers the
-     * sample into its executeTaskRoutine() 'user environment' branch;
-     * skipping the original call also suppresses CAPE's auto-clicker for
-     * this dialog, since no window is ever shown. lasterror is preserved
-     * around the forged response. */
-    if (!g_config.no_stealth) {
-        get_lasterrors(&lasterror);
+ret = Old_GetGUIThreadInfo(idThread, lpgui);
 
-        ret = MIRAGE_MSGBOX_TIMEOUT_CODE;
+/* Samples call GetGUIThreadInfo(idThread=0) to inspect the
+ * foreground GUI thread's caret state as a liveness/interaction
+ * tell: they read GUITHREADINFO.hwndCaret and rcCaret repeatedly and
+ * treat an absent caret (hwndCaret == NULL) or a caret rectangle
+ * that never changes across successive reads as the shape of an
+ * idle, headless analysis VM with no real interactive editing. On a
+ * freshly-imaged sandbox with nobody typing into an edit control
+ * there is frequently no blinking caret at all, so the check flags
+ * the host (caretPresent ratio too low, or fewer than a few caret-
+ * movement changes over the observation window). The transparent
+ * answer is to make the caret look present and alive: advertise
+ * GUI_CARETBLINKING, point hwndCaret at a live top-level window, and
+ * nudge rcCaret's origin a few pixels each call (wrapping inside a
+ * small box so it keeps changing without drifting away) so
+ * consecutive samples see a moving caret. Always report success so
+ * the read never fails over the observation window. lasterror is
+ * preserved around the forged response. */
+if (!g_config.no_stealth && lpgui != NULL &&
+        lpgui->cbSize >= sizeof(GUITHREADINFO)) {
+    get_lasterrors(&lasterror);
 
-        set_lasterrors(&lasterror);
+    caret_hwnd = GetForegroundWindow();
+    if (caret_hwnd == NULL)
+        caret_hwnd = GetDesktopWindow();
 
-        return ret;
-    }
+    lpgui->flags |= GUI_CARETBLINKING;
+    lpgui->hwndCaret = caret_hwnd;
 
-    ret = Old_MessageBoxA(hWnd, lpText, lpCaption, uType);
+    /* advance the caret origin by a few pixels per call, wrapping
+       inside a small box so the reported position keeps changing
+       across at least a few successive successful samples */
+    dx = (LONG)((mirage_caret_tick * 3) % 120);
+    dy = (LONG)((mirage_caret_tick * 2) % 80);
+    lpgui->rcCaret.left = 100 + dx;
+    lpgui->rcCaret.top = 100 + dy;
+    lpgui->rcCaret.right = lpgui->rcCaret.left + 2;
+    lpgui->rcCaret.bottom = lpgui->rcCaret.top + 16;
 
-    return ret;
+    mirage_caret_tick++;
+
+    ret = TRUE;
+
+    set_lasterrors(&lasterror);
 }
 
-HOOKDEF(BOOL, WINAPI, GetGUIThreadInfo, DWORD idThread, LPGUITHREADINFO lpgui)
-{
-    /* GUI_CARETBLINKING marks the queried thread's caret as present and
-     * blinking; define it locally in case the SDK headers this TU sees
-     * predate it. */
-    #ifndef GUI_CARETBLINKING
-    #define GUI_CARETBLINKING 0x00000001
-    #endif
-    /* Monotonic call counter driving the synthetic caret's motion so
-     * successive successful samples observe a caret that keeps moving. */
-    static unsigned int mirage_caret_tick;
-    BOOL ret;
-    lasterror_t lasterror;
-    HWND caret_hwnd;
-    LONG dx;
-    LONG dy;
+LOQ_bool("window", "ip", "Thread", idThread, "hwndCaret",
+    (ret && lpgui != NULL) ? lpgui->hwndCaret : NULL);
 
-    ret = Old_GetGUIThreadInfo(idThread, lpgui);
-
-    /* Samples call GetGUIThreadInfo(idThread=0) to inspect the
-     * foreground GUI thread's caret state as a liveness/interaction
-     * tell: they read GUITHREADINFO.hwndCaret and rcCaret repeatedly and
-     * treat an absent caret (hwndCaret == NULL) or a caret rectangle
-     * that never changes across successive reads as the shape of an
-     * idle, headless analysis VM with no real interactive editing. On a
-     * freshly-imaged sandbox with nobody typing into an edit control
-     * there is frequently no blinking caret at all, so the check flags
-     * the host (caretPresent ratio too low, or fewer than a few caret-
-     * movement changes over the observation window). The transparent
-     * answer is to make the caret look present and alive: advertise
-     * GUI_CARETBLINKING, point hwndCaret at a live top-level window, and
-     * nudge rcCaret's origin a few pixels each call (wrapping inside a
-     * small box so it keeps changing without drifting away) so
-     * consecutive samples see a moving caret. Always report success so
-     * the read never fails over the observation window. lasterror is
-     * preserved around the forged response. */
-    if (!g_config.no_stealth && lpgui != NULL &&
-            lpgui->cbSize >= sizeof(GUITHREADINFO)) {
-        get_lasterrors(&lasterror);
-
-        caret_hwnd = GetForegroundWindow();
-        if (caret_hwnd == NULL)
-            caret_hwnd = GetDesktopWindow();
-
-        lpgui->flags |= GUI_CARETBLINKING;
-        lpgui->hwndCaret = caret_hwnd;
-
-        /* advance the caret origin by a few pixels per call, wrapping
-           inside a small box so the reported position keeps changing
-           across at least a few successive successful samples */
-        dx = (LONG)((mirage_caret_tick * 3) % 120);
-        dy = (LONG)((mirage_caret_tick * 2) % 80);
-        lpgui->rcCaret.left = 100 + dx;
-        lpgui->rcCaret.top = 100 + dy;
-        lpgui->rcCaret.right = lpgui->rcCaret.left + 2;
-        lpgui->rcCaret.bottom = lpgui->rcCaret.top + 16;
-
-        mirage_caret_tick++;
-
-        ret = TRUE;
-
-        set_lasterrors(&lasterror);
+return ret;
     }
 
-    return ret;
+    HOOKDEF(DWORD, WINAPI, GetClipboardSequenceNumber, void)
+    {
+        /* Monotonic per-call sequence number handed back to the sample.
+ * Seeded at a plausible non-zero base (0x1F) so the very first read
+ * already looks like a clipboard that has seen some prior activity,
+ * and advanced by 1..3 on every invocation so no two successive
+ * reads ever match. */
+static DWORD mirage_clip_seq = 0x1F;
+static unsigned int mirage_clip_tick;
+DWORD ret;
+lasterror_t lasterror;
+
+ret = Old_GetClipboardSequenceNumber();
+
+/* Samples poll GetClipboardSequenceNumber on a fixed cadence (e.g.
+ * every 5s across a 5-minute window) and watch whether the value
+ * ever changes: they compare currentSequenceNumber against the
+ * previous read and count how many times it moved
+ * (clipboardUpdateCount), treating clipboardUpdateCount == 0 (the
+ * value never changes across successive polls) as an idle, headless
+ * sandbox with no interactive user touching the clipboard. On a
+ * freshly-imaged analysis VM the sequence number is static, so
+ * clipboardUpdateCount stays at 0 and checkCondition() flags the
+ * host. The transparent answer is to make the clipboard look
+ * actively used: return a distinct, monotonically incrementing value
+ * on every call (stepping by 1..3 so the growth reads like sporadic
+ * real clipboard edits rather than a rigid counter) so each poll
+ * observes currentSequenceNumber != lastSequenceNumber, driving
+ * clipboardUpdateCount above 0 and making the host read as a live
+ * user environment. lasterror is preserved around the forged
+ * response. */
+if (!g_config.no_stealth) {
+    get_lasterrors(&lasterror);
+
+    ret = mirage_clip_seq;
+    /* advance by 1..3 for the next poll (step cycles 1, 2, 3) */
+    mirage_clip_seq += 1 + (mirage_clip_tick % 3);
+    mirage_clip_tick++;
+
+    set_lasterrors(&lasterror);
 }
 
-HOOKDEF(DWORD, WINAPI, GetClipboardSequenceNumber, void)
-{
-    /* Monotonic per-call sequence number handed back to the sample.
-     * Starts at 0x1000 and advances by one on every invocation so no
-     * two reads ever match. */
-    static DWORD mirage_clip_seq = 0x1000;
-    DWORD ret;
-    lasterror_t lasterror;
+LOQ_void("window", "i", "SequenceNumber", ret);
 
-    ret = Old_GetClipboardSequenceNumber();
-
-    /* Samples poll GetClipboardSequenceNumber on a fixed cadence (e.g.
-     * every 5s across a 5-minute window) and watch whether the value
-     * ever changes: they compare currentSequenceNumber against the
-     * previous read and count how many times it moved
-     * (clipboardUpdateCount). On a freshly-imaged analysis VM with no
-     * interactive user touching the clipboard the sequence number is
-     * static, so clipboardUpdateCount stays at 0 and checkCondition()
-     * flags the host as an idle, headless sandbox. The transparent
-     * answer is to make the clipboard look actively used: return a
-     * distinct, monotonically incrementing value on every call so each
-     * poll observes currentSequenceNumber != lastSequenceNumber,
-     * driving clipboardUpdateCount above 0 and making the host read as a
-     * live user environment. lasterror is preserved around the forged
-     * response. */
-    if (!g_config.no_stealth) {
-        get_lasterrors(&lasterror);
-
-        ret = mirage_clip_seq++;
-
-        set_lasterrors(&lasterror);
+return ret;
     }
 
-    return ret;
+    HOOKDEF(SHORT, WINAPI, GetKeyState, int nVirtKey)
+    {
+        /* Per-key parity of the synthetic toggle bit. CapsLock and NumLock
+ * are tracked independently so each key's own successive reads flip
+ * its low-order toggle bit, producing an observable state change on
+ * every call to that key regardless of the other. */
+static unsigned int mirage_caps_tick;
+static unsigned int mirage_num_tick;
+SHORT ret;
+lasterror_t lasterror;
+unsigned int parity;
+
+ret = Old_GetKeyState(nVirtKey);
+
+/* Samples probe for a live human at the keyboard by watching the
+ * CapsLock/NumLock toggle state flip: inside a WH_KEYBOARD_LL hook
+ * they sample GetKeyState(VK_CAPITAL) & 0x0001 and
+ * GetKeyState(VK_NUMLOCK) & 0x0001 over a 60s window and count the
+ * number of low-bit (toggle) transitions. A real user tapping Caps
+ * or Num Lock produces several flips; a headless analysis VM with no
+ * interactive user leaves the toggle bit frozen, so the transition
+ * count stays below the threshold (< 3, i.e. totalCount never
+ * reaches g_minTotalToggleCountForUserEnv = 4) and the host is
+ * classified as a sandbox. The transparent answer is to alternate
+ * the returned toggle bit (0x0001) on successive reads of exactly
+ * VK_CAPITAL and VK_NUMLOCK so each poll observes a flipped toggle
+ * state: within the 60s window this yields well over 3 transitions,
+ * pushing totalCount to at least the Patch_site value of 4 and
+ * classifying the host as a genuine user environment. The high-order
+ * pressed bit and all unrelated virtual keys are passed through
+ * untouched. lasterror is preserved around the forged return. */
+if (!g_config.no_stealth &&
+        (nVirtKey == VK_CAPITAL || nVirtKey == VK_NUMLOCK)) {
+    get_lasterrors(&lasterror);
+
+    if (nVirtKey == VK_CAPITAL)
+        parity = mirage_caps_tick++;
+    else
+        parity = mirage_num_tick++;
+
+    /* flip the low-order toggle bit each call so consecutive reads
+       register a transition; leave the pressed bit as reported */
+    if (parity & 1)
+        ret |= (SHORT)0x0001;
+    else
+        ret &= (SHORT)~0x0001;
+
+    set_lasterrors(&lasterror);
 }
 
-HOOKDEF(HHOOK, WINAPI, SetWindowsHookEx, int idHook, HOOKPROC lpfn, HINSTANCE hmod, DWORD dwThreadId)
-{
-    /* Fires the sample's own WH_KEYBOARD_LL LowLevelKeyboardProc at most
-     * once per install by injecting a real synthetic keystroke. */
-    HHOOK ret;
-    lasterror_t lasterror;
+LOQ_void("window", "ii", "nVirtKey", nVirtKey, "State", (int)ret);
 
-    ret = Old_SetWindowsHookEx(idHook, lpfn, hmod, dwThreadId);
-
-    /* Samples install a WH_KEYBOARD_LL low-level keyboard hook whose
-     * LowLevelKeyboardProc watches for a WM_KEYDOWN over a ~30s window,
-     * setting g_keyPressed = true on the first keypress. A freshly-imaged
-     * analysis VM with no interactive user typing never delivers a
-     * keystroke, so g_keyPressed stays false at the end of the window and
-     * the sample concludes it is running unattended inside a sandbox. The
-     * transparent answer is to make the environment genuinely produce
-     * input: when the installed hook is a WH_KEYBOARD_LL keyboard hook,
-     * inject a real synthetic keydown+keyup pair via keybd_event on the
-     * interactive desktop. Those events travel the normal low-level input
-     * path and fire the sample's own LowLevelKeyboardProc, so it observes
-     * a WM_KEYDOWN and sets g_keyPressed = true within its monitoring
-     * window, and the host reads as a live, attended user session. If the
-     * real installation failed (ret == NULL) — as it can on a
-     * non-interactive service desktop — hand back a non-NULL sentinel
-     * HHOOK so the sample's install check still succeeds and it proceeds
-     * into its monitoring loop rather than bailing out early. lasterror is
-     * preserved around the forged response. */
-    if (!g_config.no_stealth && idHook == WH_KEYBOARD_LL) {
-        get_lasterrors(&lasterror);
-
-        /* VK_SHIFT (0x10), KEYEVENTF_KEYUP (0x0002) — a benign,
-         * non-destructive keypress that satisfies the WM_KEYDOWN watch. */
-        keybd_event(0x10, 0, 0, 0);
-        keybd_event(0x10, 0, 0x0002, 0);
-
-        if (ret == NULL)
-            ret = (HHOOK)0x1;
-
-        set_lasterrors(&lasterror);
+return ret;
     }
-
-    return ret;
-}
-
-        HOOKDEF(HWND, WINAPI, GetForegroundWindow, void)
-        {
-            HWND ret;
-	lasterror_t lasterror;
-	HWND fallback;
-
-	ret = Old_GetForegroundWindow();
-
-	/* Samples treat the presence of a valid foreground window as a
-	 * human-presence tell before resolving its owning thread and keyboard
-	 * layout: they call GetForegroundWindow() and, if the returned handle is
-	 * NULL, short-circuit the check (hForeground == nullptr) and skip the
-	 * sample straight past the GetWindowThreadProcessId / GetKeyboardLayout
-	 * path — the shape of an idle, headless analysis VM whose desktop has no
-	 * activated top-level window. On a freshly-imaged sandbox with nobody
-	 * focusing a window GetForegroundWindow legitimately returns NULL, so the
-	 * polling loop never reaches the interaction path it depends on. The
-	 * transparent answer is to hand back a stable, valid non-NULL top-level
-	 * window whenever the real query yields NULL: prefer the shell window
-	 * (the desktop's own top-level window) and fall back to the desktop
-	 * window handle, both of which are genuine live HWNDs that
-	 * GetWindowThreadProcessId and GetKeyboardLayout resolve normally. That
-	 * keeps hForeground non-NULL so the sample always reaches the
-	 * thread/layout branch and reads the host as an active user desktop.
-	 * lasterror is preserved around the forged response. */
-	if (!g_config.no_stealth && ret == NULL) {
-		get_lasterrors(&lasterror);
-
-		fallback = GetShellWindow();
-		if (fallback == NULL)
-			fallback = GetDesktopWindow();
-		ret = fallback;
-
-		set_lasterrors(&lasterror);
-	}
-
-	return ret;
-        }
-
-HOOKDEF(SHORT, WINAPI, GetKeyState, int nVirtKey)
-{
-    /* Per-key parity of the synthetic toggle bit. CapsLock and NumLock
-     * are tracked independently so each key's own successive reads flip
-     * its low-order toggle bit, producing an observable state change on
-     * every call to that key regardless of the other. */
-    static unsigned int mirage_caps_tick;
-    static unsigned int mirage_num_tick;
-    SHORT ret;
-    lasterror_t lasterror;
-    unsigned int parity;
-
-    ret = Old_GetKeyState(nVirtKey);
-
-    /* Samples probe for a live human at the keyboard by watching the
-     * CapsLock/NumLock toggle state flip: inside a WH_KEYBOARD_LL hook
-     * they sample GetKeyState(VK_CAPITAL) & 0x0001 and
-     * GetKeyState(VK_NUMLOCK) & 0x0001 over a 60s window and count the
-     * number of low-bit (toggle) transitions. A real user tapping Caps
-     * or Num Lock produces several flips; a headless analysis VM with no
-     * interactive user leaves the toggle bit frozen, so the transition
-     * count stays below the threshold (< 3, i.e. totalCount never
-     * reaches g_minTotalToggleCountForUserEnv = 4) and the host is
-     * classified as a sandbox. The transparent answer is to alternate
-     * the returned toggle bit (0x0001) on successive reads of exactly
-     * VK_CAPITAL and VK_NUMLOCK so each poll observes a flipped toggle
-     * state: within the 60s window this yields well over 3 transitions,
-     * pushing totalCount to at least the Patch_site value of 4 and
-     * classifying the host as a genuine user environment. The high-order
-     * pressed bit and all unrelated virtual keys are passed through
-     * untouched. lasterror is preserved around the forged return. */
-    if (!g_config.no_stealth &&
-            (nVirtKey == VK_CAPITAL || nVirtKey == VK_NUMLOCK)) {
-        get_lasterrors(&lasterror);
-
-        if (nVirtKey == VK_CAPITAL)
-            parity = mirage_caps_tick++;
-        else
-            parity = mirage_num_tick++;
-
-        /* flip the low-order toggle bit each call so consecutive reads
-           register a transition; leave the pressed bit as reported */
-        if (parity & 1)
-            ret |= (SHORT)0x0001;
-        else
-            ret &= (SHORT)~0x0001;
-
-        set_lasterrors(&lasterror);
-    }
-
-    return ret;
-}

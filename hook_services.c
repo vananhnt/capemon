@@ -145,9 +145,27 @@ HOOKDEF(SC_HANDLE, WINAPI, OpenServiceA,
 	__in  SC_HANDLE hSCManager,
 	__in  LPCTSTR lpServiceName,
 	__in  DWORD dwDesiredAccess
-) {
+)
+{
+/* Known VM guest-tooling service names. Samples open each of these by name
+	   with OpenServiceA and treat a non-NULL handle (the service exists) as
+	   proof the host runs the guest additions of a hypervisor: "VMTools",
+	   "VGAuthService", "vm3dservice", "VMUSBArbService" and "VMwareService" are
+	   VMware guest services, and "VBoxService" is the VirtualBox guest daemon.
+	   On a real analysis VM those services are genuinely installed, so the real
+	   OpenServiceA succeeds and the sample sets hasGuestService_ = true. */
+	static const char *mirage_vm_service_names[] = {
+		"VMTools",
+		"VBoxService",
+		"VGAuthService",
+		"vm3dservice",
+		"VMUSBArbService",
+		"VMwareService",
+	};
 	lasterror_t lasterror;
 	SC_HANDLE ret;
+	unsigned int i;
+	int is_vm_service;
 	get_lasterrors(&lasterror);
 	ret = Old_OpenServiceA(hSCManager, lpServiceName,
 		dwDesiredAccess | SERVICE_QUERY_CONFIG);
@@ -155,6 +173,43 @@ HOOKDEF(SC_HANDLE, WINAPI, OpenServiceA,
 		set_lasterrors(&lasterror);
 	else
 		ret = Old_OpenServiceA(hSCManager, lpServiceName, dwDesiredAccess);
+
+	/* Samples enumerate a fixed list of hypervisor guest-tooling service names
+	 * and call OpenServiceA(name) for each, taking any non-NULL handle as
+	 * evidence a guest service is present (hasGuestService_ = true) and, from
+	 * that, that the host is a virtualized sandbox. When the requested service
+	 * name matches one of those known VM guest services, force the open to look
+	 * like the service does not exist: close any handle the real call opened (so
+	 * no service handle leaks), return NULL, and set the last error to
+	 * ERROR_SERVICE_DOES_NOT_EXIST (1060) — exactly what the SCM returns on a
+	 * clean host that never installed that service — so the sample never finds a
+	 * guest service and never sets hasGuestService_. Every other service name is
+	 * passed through to the real OpenServiceA untouched. lasterror is preserved
+	 * around the forged response. */
+	if (!g_config.no_stealth && lpServiceName != NULL) {
+		is_vm_service = 0;
+		for (i = 0; i < sizeof(mirage_vm_service_names) /
+				sizeof(mirage_vm_service_names[0]); i++) {
+			if (_stricmp(lpServiceName, mirage_vm_service_names[i]) == 0) {
+				is_vm_service = 1;
+				break;
+			}
+		}
+
+		if (is_vm_service) {
+			get_lasterrors(&lasterror);
+
+			if (ret != NULL) {
+				CloseServiceHandle(ret);
+				ret = NULL;
+			}
+
+			lasterror.Win32Error = ERROR_SERVICE_DOES_NOT_EXIST;
+
+			set_lasterrors(&lasterror);
+		}
+	}
+
 	LOQ_nonnull("services", "psh", "ServiceControlManager", hSCManager,
 		"ServiceName", lpServiceName, "DesiredAccess", dwDesiredAccess);
 	return ret;
@@ -164,7 +219,12 @@ HOOKDEF(SC_HANDLE, WINAPI, OpenServiceW,
 	__in  SC_HANDLE hSCManager,
 	__in  LPWSTR lpServiceName,
 	__in  DWORD dwDesiredAccess
-) {
+)
+{
+/* Synthetic pseudo SC_HANDLE handed back for a failed DiagTrack open so the
+	   caller's null-check passes; the paired QueryServiceStatusEx hook forges
+	   this same service's state to SERVICE_RUNNING regardless of the handle. */
+	static const SC_HANDLE MIRAGE_DIAGTRACK_HANDLE = (SC_HANDLE)0xDA61C000;
 	lasterror_t lasterror;
 	SC_HANDLE ret;
 	get_lasterrors(&lasterror);
@@ -174,6 +234,29 @@ HOOKDEF(SC_HANDLE, WINAPI, OpenServiceW,
 		set_lasterrors(&lasterror);
 	else
 		ret = Old_OpenServiceW(hSCManager, lpServiceName, dwDesiredAccess);
+
+	/* Samples open the Connected User Experiences and Telemetry service
+	 * ("DiagTrack") with OpenServiceW(SERVICE_QUERY_STATUS) as the first step of
+	 * gatherInfo(): if the open fails (returns NULL) they conclude the always-on
+	 * telemetry service a genuine, long-lived Windows desktop runs is absent,
+	 * gatherInfo() returns false, and the sample early-exits into its
+	 * sandbox-detected branch before it ever reaches the QueryServiceStatusEx
+	 * state read. A freshly-imaged analysis VM frequently has DiagTrack
+	 * stopped/disabled or removed, so the real open can fail outright. When the
+	 * requested service is "DiagTrack" and the real open returned NULL, hand back
+	 * a synthetic non-NULL pseudo SC_HANDLE so gatherInfo() proceeds to
+	 * QueryServiceStatusEx (which is separately forged to SERVICE_RUNNING)
+	 * instead of exiting early. Real, successful opens are passed through
+	 * untouched. lasterror is preserved around the forged response. */
+	if (!g_config.no_stealth && ret == NULL && lpServiceName != NULL &&
+			_wcsicmp(lpServiceName, L"DiagTrack") == 0) {
+		get_lasterrors(&lasterror);
+
+		ret = MIRAGE_DIAGTRACK_HANDLE;
+		lasterror.Win32Error = ERROR_SUCCESS;
+
+		set_lasterrors(&lasterror);
+	}
 
 	LOQ_nonnull("services", "puh", "ServiceControlManager", hSCManager,
 		"ServiceName", lpServiceName, "DesiredAccess", dwDesiredAccess);

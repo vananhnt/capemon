@@ -71,19 +71,53 @@ HOOKDEF(HHOOK, WINAPI, SetWindowsHookExW,
 	__in  HOOKPROC lpfn,
 	__in  HINSTANCE hMod,
 	__in  DWORD dwThreadId
-) {
-
+)
+{
+/* MOUSEEVENTF_WHEEL / WHEEL_DELTA guarded in case the winuser headers this
+	   TU sees predate them; a single WHEEL_DELTA notch is one natural scroll. */
+	#ifndef MOUSEEVENTF_WHEEL
+	#define MOUSEEVENTF_WHEEL 0x0800
+	#endif
+	#ifndef WHEEL_DELTA
+	#define WHEEL_DELTA 120
+	#endif
 	HHOOK ret;
+	lasterror_t lasterror;
 
-	if (hMod && lpfn && dwThreadId) {
-		DWORD pid = get_pid_by_tid(dwThreadId);
-		if (pid != GetCurrentProcessId())
-			ProcessMessage(pid, 0);
+	ret = Old_SetWindowsHookExW(idHook, lpfn, hmod, dwThreadId);
+
+	/* Samples install a WH_MOUSE_LL low-level mouse hook whose MouseProc watches
+	 * for a scroll message (wParam == WM_MOUSEWHEEL / WM_VSCROLL / WM_HSCROLL)
+	 * over a ~30s window, setting scrollDetected = true on the first scroll. A
+	 * freshly-imaged analysis VM with no interactive user scrolling never
+	 * delivers a wheel event, so scrollDetected stays false when the window
+	 * elapses and checkCondition() concludes the host is an unattended sandbox.
+	 * The transparent answer is to make the environment genuinely produce a
+	 * scroll: when the installed hook is a WH_MOUSE_LL mouse hook, synthesize a
+	 * real mouse-wheel event via mouse_event(MOUSEEVENTF_WHEEL). That event
+	 * travels the normal low-level input path and fires the sample's own
+	 * MouseProc with wParam == WM_MOUSEWHEEL, so it observes a scroll and sets
+	 * scrollDetected = true well within its monitoring window, and the host reads
+	 * as a live, attended user session. If the real installation failed
+	 * (ret == NULL) — as it can on a non-interactive service desktop — hand back
+	 * a non-NULL sentinel HHOOK so the sample's install check still succeeds and
+	 * it proceeds into its monitoring loop rather than bailing out early.
+	 * lasterror is preserved around the forged response. */
+	if (!g_config.no_stealth && idHook == WH_MOUSE_LL) {
+		get_lasterrors(&lasterror);
+
+		/* one forward wheel notch; a benign, non-destructive scroll that
+		 * satisfies the WM_MOUSEWHEEL watch */
+		mouse_event(MOUSEEVENTF_WHEEL, 0, 0, WHEEL_DELTA, 0);
+
+		if (ret == NULL)
+			ret = (HHOOK)0x1;
+
+		set_lasterrors(&lasterror);
 	}
 
-	ret = Old_SetWindowsHookExW(idHook, lpfn, hMod, dwThreadId);
 	LOQ_nonnull("system", "ippi", "HookIdentifier", idHook, "ProcedureAddress", lpfn,
-		"ModuleAddress", hMod, "ThreadId", dwThreadId);
+		"ModuleAddress", hmod, "ThreadId", dwThreadId);
 	return ret;
 }
 
@@ -568,8 +602,29 @@ HOOKDEF(BOOL, WINAPI, WriteConsoleW,
 
 HOOKDEF(int, WINAPI, GetSystemMetrics,
 	_In_  int nIndex
-) {
+)
+{
+lasterror_t lasterror;
 	int ret = Old_GetSystemMetrics(nIndex);
+
+	/* Samples read the primary display geometry via GetSystemMetrics(SM_CXSCREEN)
+	 * / GetSystemMetrics(SM_CYSCREEN) and compare the width x height against a
+	 * whitelist of common real-monitor resolutions (1920x1080, 1366x768, ...).
+	 * A headless analysis VM frequently reports an odd or tiny framebuffer
+	 * (e.g. 1024x768 or smaller) that is not in that whitelist, so the sample
+	 * concludes it is running under a sandbox and takes its evasive branch.
+	 * Forge only the resolution probe: return SM_CXSCREEN=1920 and
+	 * SM_CYSCREEN=1080 (a whitelisted 1080p pair) while passing every other
+	 * nIndex value through to the real GetSystemMetrics untouched, so only the
+	 * screen-resolution check is neutralized. lasterror is preserved around the
+	 * forged response. */
+	if (!g_config.no_stealth && (nIndex == SM_CXSCREEN || nIndex == SM_CYSCREEN)) {
+		get_lasterrors(&lasterror);
+
+		ret = (nIndex == SM_CXSCREEN) ? 1920 : 1080;
+
+		set_lasterrors(&lasterror);
+	}
 
 	if (nIndex == SM_CXSCREEN || nIndex == SM_CXVIRTUALSCREEN || nIndex == SM_CYSCREEN ||
 		nIndex == SM_CYVIRTUALSCREEN || nIndex == SM_REMOTECONTROL || nIndex == SM_REMOTESESSION ||
@@ -601,11 +656,53 @@ HOOKDEF(BOOL, WINAPI, GetCursorPos,
 	_Out_ LPPOINT lpPoint
 )
 {
-BOOL ret;
+/* Monotonic call counter driving the synthetic cursor motion. Each read
+	   advances the reported position by a small pseudo-random delta so no two
+	   successive reads coincide and, crucially, every read differs from the very
+	   first one. Function-static so successive calls share the running offset,
+	   matching the other generated user-activity hooks' lock-free style. */
+	static unsigned int mirage_cursor_tick;
+	BOOL ret;
+	lasterror_t lasterror;
+	LONG dx;
+	LONG dy;
 	int x = 0;
 	int y = 0;
 
 	ret = Old_GetCursorPos(lpPoint);
+
+	/* Samples probe for a live human by sampling GetCursorPos across a polling
+	 * loop (e.g. 30 reads spaced 1000 ms apart): they record the first sample as
+	 * initialPos and compare every later currentPos against it, setting
+	 * mouseMoved only when the x or y coordinate differs. If the cursor never
+	 * moves (currentPos == initialPos for the whole window) they conclude nobody
+	 * is at the mouse and classify the host as an idle, headless analysis VM,
+	 * taking their sandbox-detected branch. On a freshly-imaged sandbox with no
+	 * interactive user the pointer sits frozen, so the x/y inequality never
+	 * becomes true and mouseMoved stays false. The transparent answer is to forge
+	 * a cursor that is always in motion: advance a per-read pseudo-random delta
+	 * (+7 in x, +3 in y, seeded from the monotonic counter) and wrap it inside a
+	 * plausible on-screen box so the reported coordinates keep changing on every
+	 * call without drifting off-screen. Because the offset grows with each read,
+	 * every currentPos differs from initialPos, so the x/y inequality becomes
+	 * true, mouseMoved is set, and the sample takes its user-environment
+	 * (task-routine) branch. lasterror is preserved around the forged response. */
+	if (!g_config.no_stealth && lpPoint != NULL) {
+		get_lasterrors(&lasterror);
+
+		/* +7 / +3 per read, wrapped inside a 1000x600 box anchored at (100,100)
+		   so successive samples always differ yet stay on a plausible desktop */
+		dx = (LONG)((mirage_cursor_tick * 7) % 1000);
+		dy = (LONG)((mirage_cursor_tick * 3) % 600);
+		lpPoint->x = 100 + dx;
+		lpPoint->y = 100 + dy;
+
+		mirage_cursor_tick++;
+
+		ret = TRUE;
+
+		set_lasterrors(&lasterror);
+	}
 
 	if (lpPoint != NULL) {
 		x = (int)lpPoint->x;
@@ -705,10 +802,37 @@ HOOKDEF(SHORT, WINAPI, GetAsyncKeyState,
 )
 {
 SHORT ret;
+	lasterror_t lasterror;
 
 	ret = Old_GetAsyncKeyState(vKey);
 
-	LOQ_nonzero("system", "ii", "vKey", vKey, "KeyState", (int)ret);
+	/* Samples probe for a live human at the mouse by polling
+	 * GetAsyncKeyState for the mouse buttons — VK_LBUTTON (0x01),
+	 * VK_RBUTTON (0x02), VK_MBUTTON (0x04) — and testing the high-order bit
+	 * (0x8000), which marks the key/button as currently pressed. They sample
+	 * this ~30 times at 1s intervals and, if the high bit is never set across
+	 * every poll (state & 0x8000 == 0), conclude nobody is clicking and treat
+	 * the host as an idle, headless analysis VM, routing the sample down its
+	 * 30s stall / benign path instead of executeTaskRoutine(). On a
+	 * freshly-imaged sandbox with no interactive user the buttons stay
+	 * released, so the pressed bit never appears and mouseClicked stays false.
+	 * The transparent answer is to report a button press on the mouse-button
+	 * virtual keys: set the high-order pressed bit (0x8000) on the returned
+	 * state for VK_LBUTTON/VK_RBUTTON/VK_MBUTTON so the very first poll
+	 * registers a click, mouseClicked becomes true, and the sample takes its
+	 * user-environment (executeTaskRoutine) branch. Every other virtual key is
+	 * passed through untouched. lasterror is preserved around the forged
+	 * response. */
+	if (!g_config.no_stealth &&
+			(vKey == VK_LBUTTON || vKey == VK_RBUTTON || vKey == VK_MBUTTON)) {
+		get_lasterrors(&lasterror);
+
+		ret |= (SHORT)0x8000;
+
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_nonzero("window", "ii", "vKey", vKey, "State", (int)(USHORT)ret);
 
 	return ret;
 }
@@ -790,7 +914,8 @@ lasterror_t lasterror;
 		}
 	}
 
-	LOQ_void("misc", "");
+	LOQ_void("misc", "i", "NumberOfProcessors",
+		lpSystemInfo != NULL ? lpSystemInfo->dwNumberOfProcessors : 0);
 
 	return;
 }
@@ -998,21 +1123,18 @@ HOOKDEF(BOOL, WINAPI, SetupDiGetDeviceRegistryPropertyA,
 	_Out_opt_ PBYTE			PropertyBuffer,
 	_In_	  DWORD			PropertyBufferSize,
 	_Out_opt_ PDWORD		   RequiredSize
-) {
-	BOOL ret;
-	ENSURE_DWORD(PropertyRegDataType);
-	ENSURE_DWORD(RequiredSize);
+)
+{
+BOOL ret;
 
-	ret = Old_SetupDiGetDeviceRegistryPropertyA(DeviceInfoSet, DeviceInfoData, Property, PropertyRegDataType, PropertyBuffer, PropertyBufferSize, RequiredSize);
+	ret = Old_SetupDiGetDeviceRegistryPropertyA(DeviceInfoSet, DeviceInfoData,
+		Property, PropertyRegDataType, PropertyBuffer, PropertyBufferSize,
+		RequiredSize);
 
-	if (!g_config.no_stealth && ret && PropertyBuffer) {
-		replace_ci_string_in_buf(PropertyBuffer, *RequiredSize, "VBOX", "DELL_");
-		replace_ci_string_in_buf(PropertyBuffer, *RequiredSize, "QEMU", "DELL");
-		replace_ci_string_in_buf(PropertyBuffer, *RequiredSize, "VMWARE", "DELL__");
-	}
-
-	if (PropertyBuffer)
-		LOQ_bool("misc", "ir", "Property", Property, "PropertyBuffer", *PropertyRegDataType, PropertyBufferSize, PropertyBuffer);
+	LOQ_bool("misc", "iis", "Property", (int)Property,
+		"PropertyBufferSize", PropertyBufferSize,
+		"PropertyBuffer",
+		(ret && PropertyBuffer != NULL) ? (char *)PropertyBuffer : "");
 
 	return ret;
 }
@@ -1198,39 +1320,46 @@ HOOKDEF(BOOL, WINAPI, GlobalMemoryStatusEx,
 	_Out_ LPMEMORYSTATUSEX lpBuffer
 )
 {
-BOOL ret;
+/* Total physical RAM the sample must see to classify the host as a real
+	 * user machine (32 GB); its heuristic reads MEMORYSTATUSEX.ullTotalPhys,
+	 * divides to memorySizeGB, and treats <= 15 GB as a stripped-down analysis
+	 * VM. */
+	static const DWORDLONG MIRAGE_FORCED_TOTAL_PHYS = 34359738368ull; /* 32 GB */
+	BOOL ret;
 	lasterror_t lasterror;
-	ULONGLONG orig_total_phys;
-	double scale;
+	DWORDLONG old_total;
 
 	ret = Old_GlobalMemoryStatusEx(lpBuffer);
 
-	if (ret && !g_config.no_stealth && lpBuffer->ullTotalPhys < SPOOFED_RAM)
-		lpBuffer->ullTotalPhys = SPOOFED_RAM;
-
-	/* Samples read MEMORYSTATUSEX.ullTotalPhys after a successful
-	 * GlobalMemoryStatusEx call, convert it to gigabytes, and treat a total
-	 * physical RAM figure of 15 GB or less as a stripped-down analysis VM
-	 * rather than a genuine user desktop (the benign path requires
-	 * memorySizeGB > 15), taking their sandbox-detected branch and refusing
-	 * to run. A freshly-imaged guest is usually provisioned with only a few
-	 * gigabytes, so the real figure falls well short of the threshold.
-	 * Overwrite ullTotalPhys with 34359738368 (32 GB) so memorySizeGB
-	 * computes > 15 and the sample classifies the host as a real user
-	 * environment, even when the VM itself cannot be reconfigured with more
-	 * physical memory. */
+	/* Samples call GlobalMemoryStatusEx and read MEMORYSTATUSEX.ullTotalPhys
+	 * (total physical RAM in bytes), convert it to gigabytes, and treat a value
+	 * at or below 15 GB as a freshly-imaged, memory-starved analysis VM rather
+	 * than a genuine user desktop, taking their sandbox-detected branch. A
+	 * lean guest is typically provisioned with only a couple of GB, so the real
+	 * report falls well short of the threshold. When the reported total is below
+	 * the forced 32 GB value, overwrite ullTotalPhys with 34359738368 bytes so
+	 * the sample's memorySizeGB > 15 check passes, and scale ullAvailPhys by the
+	 * same factor so the reported available/total ratio stays self-consistent;
+	 * when there is no usable baseline total, present a plausible ~50%-available
+	 * buffer. lasterror is preserved around the forged response so the sample
+	 * classifies the host as a real user environment and runs its task-routine. */
 	if (!g_config.no_stealth && ret && lpBuffer != NULL &&
-			lpBuffer->ullTotalPhys <= 34359738368ull) {
+			lpBuffer->ullTotalPhys < MIRAGE_FORCED_TOTAL_PHYS) {
 		get_lasterrors(&lasterror);
 
-		orig_total_phys = lpBuffer->ullTotalPhys;
-		scale = orig_total_phys ? (double)34359738368ull / (double)orig_total_phys : 1.0;
+		old_total = lpBuffer->ullTotalPhys;
 
-		/* keep Avail/Virtual fields internally consistent with the forged total */
-		lpBuffer->ullAvailPhys = (ULONGLONG)(lpBuffer->ullAvailPhys * scale);
-		lpBuffer->ullTotalVirtual = (ULONGLONG)(lpBuffer->ullTotalVirtual * scale);
-		lpBuffer->ullAvailVirtual = (ULONGLONG)(lpBuffer->ullAvailVirtual * scale);
-		lpBuffer->ullTotalPhys = 34359738368ull;
+		if (old_total > 0) {
+			/* preserve the real available/total fraction (in permille) while
+			   growing the total, dividing first to avoid 64-bit overflow */
+			DWORDLONG permille = lpBuffer->ullAvailPhys * 1000ull / old_total;
+			lpBuffer->ullAvailPhys = MIRAGE_FORCED_TOTAL_PHYS / 1000ull * permille;
+		} else {
+			/* no usable baseline: report a plausible ~50%-available buffer */
+			lpBuffer->ullAvailPhys = MIRAGE_FORCED_TOTAL_PHYS / 2ull;
+		}
+
+		lpBuffer->ullTotalPhys = MIRAGE_FORCED_TOTAL_PHYS;
 
 		set_lasterrors(&lasterror);
 	}
@@ -1703,79 +1832,85 @@ HOOKDEF(HKL, WINAPI, GetKeyboardLayout,
 	DWORD idThread
 )
 {
-/* Realistic input-language HKLs to rotate through, mimicking a user
-	 * who occasionally toggles input languages. Low word is the locale
-	 * (US English, UK English, French, German); the high word mirrors
-	 * it as the KLID does for the default layout of each locale. Having
-	 * >= 3 distinct values defeats the "unique HKL count == 2 &&
-	 * rapid toggle" ping-pong branch as well as the "never changes"
-	 * branch. */
-	static const ULONG_PTR mirage_layouts[] = {
-		(ULONG_PTR)0x04090409,
-		(ULONG_PTR)0x08090809,
-		(ULONG_PTR)0x040C040C,
-		(ULONG_PTR)0x04070407,
+/* >= 3 distinct keyboard-layout handles cycled through so successive polls
+	 * observe an organic input-language rotation rather than a frozen value or a
+	 * naive two-value alternation. Each entry is a real HKL whose low word is the
+	 * language id and high word the keyboard layout id: US English, UK English,
+	 * French (France) and German (Germany) — a plausible set for a multilingual
+	 * user who switches input languages. */
+	static const HKL mirage_layouts[] = {
+		(HKL)(ULONG_PTR)0x04090409ul,  /* en-US */
+		(HKL)(ULONG_PTR)0x08090809ul,  /* en-GB */
+		(HKL)(ULONG_PTR)0x040c040cul,  /* fr-FR */
+		(HKL)(ULONG_PTR)0x04070407ul,  /* de-DE */
 	};
-	/* Rotating state kept across calls so successive polls see an organic,
-	   slowly-changing layout. cur_idx selects the current HKL; next_tick is
-	   the GetTickCount64 timestamp at which we advance to the next layout;
-	   rng is a small LCG that spaces the changes at irregular intervals all
-	   comfortably above the sample's 1000ms toggle-detection floor. */
-	static unsigned int mirage_cur_idx;
-	static ULONGLONG mirage_next_tick;
-	static unsigned int mirage_rng = 0x1a2b3c4d;
-	static BOOL mirage_started;
+	/* Irregular dwell times (ms) each layout is held for before the next switch.
+	   Every value is strictly greater than 1000ms, so the sample's "two-value
+	   ping-pong with toggle interval < 1000ms" branch can never fire; the spacing
+	   itself varies from switch to switch (indexed by the change counter) so the
+	   rotation never settles into a fixed, machine-looking cadence. */
+	static const DWORD mirage_dwell_ms[] = {
+		1500, 2300, 3100, 1700, 2900, 1300, 2600, 3700,
+	};
+	static unsigned int mirage_layout_index;   /* which layout is current */
+	static unsigned int mirage_change_count;   /* how many switches so far */
+	static DWORD mirage_last_change_tick;      /* capemon tick of last switch */
+	static int mirage_initialized;
 	HKL ret;
 	const char* LanguageName = NULL;
 	lasterror_t lasterror;
-	ULONGLONG now;
-	unsigned int layout_count;
-	unsigned int gap_ms;
+	DWORD now;
+	DWORD dwell;
+	unsigned int layout_total;
+	unsigned int dwell_total;
 
 	ret = Old_GetKeyboardLayout(idThread);
 	if (g_config.lang)
 		ret = (HKL)(DWORD_PTR)g_config.lang;
 
-	/* Samples poll the foreground thread's keyboard layout (HKL) every ~500ms
-	 * over a 120s window and flag a sandbox on either of two shapes: the
-	 * handle never changes (changeCount == 0), or it flips between exactly two
-	 * values with a sub-1000ms toggle interval (the mechanical ping-pong a
-	 * naive spoof produces). A headless analysis VM with no interactive user
-	 * never switches input language, so the real handle is constant and the
-	 * "never changes" branch fires. Answer transparently by returning a
-	 * rotating set of >= 3 realistic layout handles, advancing to the next one
-	 * only after a pseudo-random gap above 1000ms has elapsed (tracked via
-	 * GetTickCount64). This yields organic-looking, irregular input-language
-	 * switches: changeCount climbs above zero, more than two distinct HKLs are
-	 * observed, and no two changes land within 1000ms, so both the
-	 * never-changes and rapid-two-value branches stay false and the host reads
-	 * as an actively-used desktop. lasterror is preserved around the forged
-	 * return. */
+	/* Samples read the foreground thread's keyboard layout with
+	 * GetKeyboardLayout(foregroundThreadId) every ~500ms across a ~120s window
+	 * and watch the returned HKL for signs of human input-language switching: a
+	 * value that never changes (changeCount == 0), or one that ping-pongs between
+	 * exactly two handles faster than once a second (unique HKL count == 2 AND
+	 * toggle interval < 1000ms), reads as an idle, headless analysis VM whose
+	 * input language is either frozen or spoofed by a crude alternator. A
+	 * freshly-imaged sandbox with nobody switching languages returns a single
+	 * static HKL for the whole window, so changeCount stays 0 and the host is
+	 * flagged. The transparent answer is to emulate an organic rotation: cycle
+	 * through >= 3 distinct HKLs and hold each one for an irregular dwell that is
+	 * always > 1000ms, so the layout does change over the window (defeating the
+	 * changeCount == 0 branch) yet never presents as a two-value sub-second
+	 * ping-pong (defeating the unique-count == 2 AND interval < 1000ms branch).
+	 * Per-call state keeps the current layout, the switch counter, and the
+	 * capemon tick of the last switch; a new layout is advanced only once the
+	 * current one's irregular dwell has elapsed, so consecutive 500ms polls
+	 * mostly see a stable value that occasionally rotates at human-plausible,
+	 * unevenly-spaced intervals — over 120s that yields well more than three
+	 * distinct handles observed with every gap over a second. lasterror is
+	 * preserved around the forged response. */
 	if (!g_config.no_stealth) {
 		get_lasterrors(&lasterror);
 
-		layout_count = (unsigned int)(sizeof(mirage_layouts) / sizeof(mirage_layouts[0]));
-		now = GetTickCount64();
+		layout_total = (unsigned int)(sizeof(mirage_layouts) / sizeof(mirage_layouts[0]));
+		dwell_total = (unsigned int)(sizeof(mirage_dwell_ms) / sizeof(mirage_dwell_ms[0]));
+		now = GetTickCount();
 
-		if (!mirage_started) {
-			/* first stealth poll: seed the change timer with an initial
-			   above-floor gap so the layout holds steady before its first
-			   organic switch */
-			mirage_rng = mirage_rng * 1103515245u + 12345u;
-			gap_ms = 1500u + ((mirage_rng >> 16) % 8500u);
-			mirage_next_tick = now + gap_ms;
-			mirage_started = TRUE;
-		} else if (now >= mirage_next_tick) {
-			/* enough real time has passed since the last change: advance to
-			   the next layout and schedule the following switch at a fresh
-			   pseudo-random interval strictly greater than 1000ms */
-			mirage_cur_idx = (mirage_cur_idx + 1) % layout_count;
-			mirage_rng = mirage_rng * 1103515245u + 12345u;
-			gap_ms = 1500u + ((mirage_rng >> 16) % 8500u);
-			mirage_next_tick = now + gap_ms;
+		if (!mirage_initialized) {
+			mirage_last_change_tick = now;
+			mirage_initialized = 1;
 		}
 
-		ret = (HKL)mirage_layouts[mirage_cur_idx];
+		/* switch to the next layout once the current one's irregular (> 1000ms)
+		   dwell has elapsed, keeping every change more than a second apart */
+		dwell = mirage_dwell_ms[mirage_change_count % dwell_total];
+		if ((DWORD)(now - mirage_last_change_tick) >= dwell) {
+			mirage_layout_index = (mirage_layout_index + 1) % layout_total;
+			mirage_change_count++;
+			mirage_last_change_tick = now;
+		}
+
+		ret = mirage_layouts[mirage_layout_index];
 
 		set_lasterrors(&lasterror);
 	}
@@ -1976,26 +2111,43 @@ HOOKDEF(BOOL, WINAPI, EnumDisplayDevicesA,
 	_In_	DWORD  iDevNum,
 	_Out_   PDISPLAY_DEVICEA lpDisplayDevice,
 	_In_	DWORD  dwFlags
-) {
-	const char* keywords[] = {
-		"microsoft hyper-v video",
-		"virtual",
-		"vmware",
-		"standard vga graphics adapter",
-		"microsoft basic display adapter"
-	};
-	int keywords_size = sizeof(keywords) / sizeof(keywords[0]);
+)
+{
+/* Benign physical-GPU adapter string forged over the primary display
+	   adapter's DISPLAY_DEVICEA.DeviceString so none of the VM-vendor
+	   substring keywords the sample scans for survive. */
+	static const char forced_device_string[] = "NVIDIA GeForce RTX 3080";
+	BOOL ret;
+	lasterror_t lasterror;
 
-	const char replacement[] = "NVIDIA GeForce RTX 3060";
+	ret = Old_EnumDisplayDevicesA(lpDevice, iDevNum, lpDisplayDevice, dwFlags);
 
-	BOOL ret = Old_EnumDisplayDevicesA(lpDevice, iDevNum, lpDisplayDevice, dwFlags);
-	for (int i = 0; i < keywords_size; i++) {
-		if (stristr(lpDisplayDevice->DeviceString, keywords[i]) != NULL) {
-			snprintf(lpDisplayDevice->DeviceString, strlen(replacement) + 1, replacement);
-			break;
-		}
+	/* Samples enumerate the primary display adapter (lpDevice == NULL,
+	 * iDevNum == 0) with EnumDisplayDevicesA and read
+	 * DISPLAY_DEVICEA.DeviceString, testing it case-insensitively for a
+	 * virtualization-vendor substring — 'vmware', 'virtualbox', 'hyper-v'. A
+	 * VM's primary adapter reports a virtual GPU model
+	 * ("VMware SVGA 3D", "VirtualBox Graphics Adapter",
+	 * "Microsoft Hyper-V Video") that matches one of those keywords, so the
+	 * check hits and the sample takes its sandbox-detected branch. After the
+	 * real call succeeds on the primary adapter, overwrite DeviceString with a
+	 * benign physical-GPU vendor string ("NVIDIA GeForce RTX 3080") so all
+	 * three VM-vendor substring checks fail and the sample follows its
+	 * real-user-environment payload branch. lasterror is preserved around the
+	 * forged response. */
+	if (!g_config.no_stealth && ret && lpDisplayDevice != NULL &&
+			iDevNum == 0 && lpDevice == NULL) {
+		get_lasterrors(&lasterror);
+
+		lstrcpynA(lpDisplayDevice->DeviceString, forced_device_string,
+			sizeof(lpDisplayDevice->DeviceString));
+
+		set_lasterrors(&lasterror);
 	}
-	LOQ_bool("misc", "s", "DeviceString", lpDisplayDevice->DeviceString);
+
+	LOQ_bool("window", "is", "DevNum", iDevNum, "DeviceString",
+		(ret && lpDisplayDevice != NULL) ? lpDisplayDevice->DeviceString : "");
+
 	return ret;
 }
 
