@@ -392,14 +392,124 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExW,
 )
 {
 LONG ret;
+	lasterror_t lasterror;
+	typedef LONG (WINAPI *NtQueryKey_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+	NtQueryKey_t pNtQueryKey;
+	HMODULE ntdll;
+	BYTE keybuf[1024];
+	ULONG reslen, namelen, namechars, i;
+	const wchar_t *name;
+	const wchar_t suffix[] = L"CurrentVersion\\Uninstall";
+	unsigned int suffixlen = (unsigned int)(sizeof(suffix) / sizeof(wchar_t) - 1);
+	int is_uninstall;
+	wchar_t fake[16];
+	wchar_t ca, cb;
+	unsigned int num;
+	FILETIME nowft;
+	ULARGE_INTEGER stamp;
 
-	/* Diagnostic-only fallback: a real transparency countermeasure for this
-	 * API failed to compile even after a repair attempt, so this hook simply
-	 * forwards to the original function and returns its result completely
-	 * unmodified. It logs the real arguments and return value for analysis
-	 * visibility but alters no output buffers or arguments. */
 	ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcName, lpReserved,
 		lpClass, lpcClass, lpftLastWriteTime);
+
+	/* The sample counts the subkeys of
+	 * HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall (in both WOW64
+	 * views) by walking dwIndex until ERROR_NO_MORE_ITEMS, and treats a tally
+	 * below 100 as "nobody ever installed anything on this box" => sandbox. A
+	 * freshly imaged analysis guest genuinely has only a few dozen Uninstall
+	 * subkeys, so forwarding the real answer (the previous diagnostic body)
+	 * always loses the check. Transparent response: once the real enumeration
+	 * is exhausted, keep the walk alive with synthesised, plausibly named
+	 * uninstall entries until the index reaches 128, so the loop counts 128
+	 * installed applications before it finally sees ERROR_NO_MORE_ITEMS. Every
+	 * out parameter the caller may read is filled consistently - the name
+	 * buffer, *lpcName (characters excluding the terminator), an empty class
+	 * (these keys carry none) and a staggered last-write time - and
+	 * ERROR_MORE_DATA is returned honestly when the caller's buffer is too
+	 * small. Only handles whose NtQueryKey path ends in
+	 * CurrentVersion\Uninstall are touched (which covers the native and the
+	 * WOW6432Node view alike), so every other registry enumeration in the
+	 * process is unaffected, and lasterror is preserved and normalised around
+	 * the forged path so a following GetLastError() cannot expose it. */
+	if (!g_config.no_stealth && ret == ERROR_NO_MORE_ITEMS && dwIndex < 128 &&
+			lpName != NULL && lpcName != NULL) {
+		get_lasterrors(&lasterror);
+
+		is_uninstall = 0;
+		ntdll = GetModuleHandleA("ntdll.dll");
+		if (ntdll != NULL) {
+			pNtQueryKey = (NtQueryKey_t)GetProcAddress(ntdll, "NtQueryKey");
+			if (pNtQueryKey != NULL) {
+				reslen = 0;
+				/* 3 == KeyNameInformation: ULONG NameLength followed by the
+				   full \REGISTRY\... path, not NUL terminated */
+				if (pNtQueryKey((HANDLE)hKey, 3, keybuf, (ULONG)sizeof(keybuf),
+						&reslen) >= 0 && reslen > sizeof(ULONG)) {
+					namelen = *(ULONG *)keybuf;
+					name = (const wchar_t *)(keybuf + sizeof(ULONG));
+					namechars = namelen / (ULONG)sizeof(wchar_t);
+					if (namechars >= suffixlen && namechars <=
+							(ULONG)((sizeof(keybuf) - sizeof(ULONG)) / sizeof(wchar_t))) {
+						is_uninstall = 1;
+						for (i = 0; i < suffixlen; i++) {
+							ca = name[namechars - suffixlen + i];
+							cb = suffix[i];
+							if (ca >= L'A' && ca <= L'Z')
+								ca = (wchar_t)(ca + 32);
+							if (cb >= L'A' && cb <= L'Z')
+								cb = (wchar_t)(cb + 32);
+							if (ca != cb) {
+								is_uninstall = 0;
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if (is_uninstall) {
+			/* deterministic, plausible update-package style subkey name:
+			   "KB" followed by seven digits, unique per index */
+			num = 4030000 + (unsigned int)dwIndex * 137;
+			fake[0] = L'K';
+			fake[1] = L'B';
+			for (i = 0; i < 7; i++) {
+				fake[2 + 6 - i] = (wchar_t)(L'0' + (num % 10));
+				num /= 10;
+			}
+			fake[9] = L'\0';
+
+			if (*lpcName < 10) {
+				ret = ERROR_MORE_DATA;
+				lasterror.Win32Error = ERROR_MORE_DATA;
+			}
+			else {
+				for (i = 0; i < 10; i++)
+					lpName[i] = fake[i];
+				*lpcName = 9;
+
+				if (lpClass != NULL && lpcClass != NULL && *lpcClass > 0)
+					lpClass[0] = L'\0';
+				if (lpcClass != NULL)
+					*lpcClass = 0;
+
+				if (lpftLastWriteTime != NULL) {
+					GetSystemTimeAsFileTime(&nowft);
+					stamp.LowPart = nowft.dwLowDateTime;
+					stamp.HighPart = nowft.dwHighDateTime;
+					/* stagger the fabricated installs one day apart, into the past */
+					stamp.QuadPart -= (ULONGLONG)(dwIndex + 1) * 864000000000ULL;
+					lpftLastWriteTime->dwLowDateTime = stamp.LowPart;
+					lpftLastWriteTime->dwHighDateTime = stamp.HighPart;
+				}
+
+				ret = ERROR_SUCCESS;
+				lasterror.Win32Error = ERROR_SUCCESS;
+			}
+		}
+
+		set_lasterrors(&lasterror);
+	}
 
 	LOQ_zero("registry", "piu", "Handle", hKey, "Index", dwIndex, "Name",
 		(ret == ERROR_SUCCESS && lpName != NULL) ? lpName : L"");
@@ -458,7 +568,7 @@ HOOKDEF(LONG, WINAPI, RegEnumValueW,
 		WCHAR Name[1];
 	} MIRAGE_KEY_NAME_INFORMATION;
 #endif
-	/* Rotating pool of plausible FeatureUsage\AppSwitched value entries.
+	/* Rotating pool of plausible FeatureUsage\\AppSwitched value entries.
 	   Real AppSwitched values are keyed by an application identifier — an
 	   AUMID or a full executable path — with a REG_DWORD switch-count
 	   payload, so each synthetic entry reads as an app a real user has
@@ -489,54 +599,79 @@ HOOKDEF(LONG, WINAPI, RegEnumValueW,
 		L"C:\\Program Files\\Slack\\slack.exe",
 		L"C:\\Program Files\\Zoom\\bin\\Zoom.exe",
 	};
+	/* Opaque shell ITEMIDLIST used as the REG_BINARY payload of synthetic
+	   ComDlg32 MRU entries: a My-Computer CLSID item, a "C:\\" drive item and
+	   the two-byte list terminator — the same shape as the real PidlMRU blobs
+	   this key already holds, so a parser that walks cb fields sees a
+	   well-formed pidl rather than filler. */
+	static const unsigned char mirage_mru_pidl[] = {
+		0x14, 0x00, 0x1f, 0x50, 0xe0, 0x4f, 0xd0, 0x20,
+		0xea, 0x3a, 0x69, 0x10, 0xa2, 0xd8, 0x08, 0x00,
+		0x2b, 0x30, 0x30, 0x9d,
+		0x19, 0x00, 0x2f, 0x43, 0x3a, 0x5c, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00,
+		0x00, 0x00
+	};
 	/* Drive the enumerable value count past the sample's "< 20" threshold:
-	   ensure indices 0..23 all yield ERROR_SUCCESS before ERROR_NO_MORE_ITEMS.
-	   24 == the task's forced value, comfortably above the 20-value floor. */
-	static const DWORD MIRAGE_APPSWITCHED_MIN_COUNT = 24;
+	   ensure at least 24 entries yield ERROR_SUCCESS before
+	   ERROR_NO_MORE_ITEMS. 24 == the task's forced value. */
+	static const DWORD MIRAGE_MIN_ENTRIES = 24;
 	LONG ret;
 	lasterror_t lasterror;
 	HMODULE hNtdll;
 	LONG (WINAPI *pNtQueryKey)(HANDLE, int, PVOID, ULONG, PULONG);
 	unsigned char keyname_buf[1024];
+	unsigned char pidl_buf[64];
+	wchar_t namebuf[16];
+	wchar_t digits[12];
 	ULONG keyname_len;
 	MIRAGE_KEY_NAME_INFORMATION *keyname;
 	const wchar_t *name_w;
 	const wchar_t *p;
-	int is_appswitched;
 	const wchar_t *value;
+	DWORD listex[32];
 	DWORD value_chars;
 	DWORD usage;
 	DWORD pool_total;
+	DWORD pidl_len;
+	DWORD slot;
+	DWORD n;
+	int key_kind;
+	int t;
+	int i;
+
 	ENSURE_DWORD(lpType);
 	ret = Old_RegEnumValueW(hKey, dwIndex, lpValueName, lpcchValueName,
 		lpReserved, lpType, lpData, lpcbData);
 
-	/* Samples enumerate the values under
-	 * HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FeatureUsage\
-	 * AppSwitched via RegEnumValueW(index++), counting each ERROR_SUCCESS
-	 * iteration, and treat a value count below 20 as a freshly-imaged
-	 * analysis VM: AppSwitched records one value per application the user has
-	 * alt-tab/taskbar-switched to, so an aged, genuinely-used desktop
-	 * accumulates dozens of entries while a bare guest has almost none. A
-	 * sparse key steers the sample into its sandbox-detected branch. To
-	 * confirm the enumerated handle really is FeatureUsage\AppSwitched (rather
-	 * than blindly padding every RegEnumValueW), resolve the handle's registry
-	 * path with NtQueryKey(KeyNameInformation) and match the trailing
-	 * "FeatureUsage\AppSwitched" component case-insensitively. When it matches
-	 * and the real enumeration has run dry (ERROR_NO_MORE_ITEMS) while the
-	 * caller is still within the first MIRAGE_APPSWITCHED_MIN_COUNT (24)
-	 * indices, synthesize one more value entry: a plausible app path/AUMID name
-	 * plus a REG_DWORD usage count. This guarantees at least 24 successful
-	 * enumerations before ERROR_NO_MORE_ITEMS, so the observed count clears the
-	 * < 20 threshold and the host reads as a lived-in user environment. Real
-	 * values returned by the original call, and enumerations of any other key,
-	 * pass through untouched. lasterror is preserved around the forged
-	 * response. */
-	if (!g_config.no_stealth && ret == ERROR_NO_MORE_ITEMS &&
-			dwIndex < MIRAGE_APPSWITCHED_MIN_COUNT &&
-			lpValueName != NULL && lpcchValueName != NULL) {
-		is_appswitched = 0;
-
+	/* Two families of "has a human used this desktop?" registry probes reach
+	 * this API, and both are answered here:
+	 *
+	 *   key_kind 1 — HKCU\\...\\Explorer\\FeatureUsage\\AppSwitched: one value per
+	 *     application the user alt-tab/taskbar-switched to. A sample counts the
+	 *     ERROR_SUCCESS iterations and treats "< 20" as a freshly-imaged VM.
+	 *   key_kind 2 — HKCU\\...\\Explorer\\ComDlg32\\{OpenSavePidlMRU,
+	 *     LastVisitedPidlMRU,...} and the sibling RecentDocs / RunMRU /
+	 *     TypedPaths MRU keys: numbered values holding shell pidls plus an
+	 *     MRUListEx index list. The previous revision of this hook only knew
+	 *     about AppSwitched, so the OpenSavePidlMRU enumeration ran dry after
+	 *     three real values and the sample concluded "few MRU entries".
+	 *
+	 * The enumerated handle is classified by resolving its registry path with
+	 * NtQueryKey(KeyNameInformation) so unrelated keys are never padded. When
+	 * the real enumeration has run dry (ERROR_NO_MORE_ITEMS) and the caller is
+	 * still inside the first MIRAGE_MIN_ENTRIES slots, one more plausible entry
+	 * is synthesised: an app path/AUMID + REG_DWORD switch count for kind 1, or
+	 * a numbered value + REG_BINARY pidl for kind 2. For kind 2 the MRUListEx
+	 * value is additionally rewritten as it is enumerated so its index list
+	 * agrees with the forged entry count — a sample that counts entries and a
+	 * sample that parses MRUListEx then see the same, lived-in number instead of
+	 * contradicting each other. Real values and every other key pass through
+	 * untouched; lasterror is preserved around each forged path. */
+	key_kind = 0;
+	if (!g_config.no_stealth) {
 		hNtdll = GetModuleHandleA("ntdll.dll");
 		if (hNtdll != NULL) {
 			pNtQueryKey = (LONG (WINAPI *)(HANDLE, int, PVOID, ULONG, PULONG))
@@ -555,9 +690,15 @@ HOOKDEF(LONG, WINAPI, RegEnumValueW,
 							keyname->NameLength) = L'\0';
 						name_w = keyname->Name;
 						for (p = name_w; *p != L'\0'; p++) {
-							if (_wcsnicmp(p,
-									L"FeatureUsage\\AppSwitched", 24) == 0) {
-								is_appswitched = 1;
+							if (_wcsnicmp(p, L"FeatureUsage\\AppSwitched", 24) == 0) {
+								key_kind = 1;
+								break;
+							}
+							if (_wcsnicmp(p, L"ComDlg32\\", 9) == 0 ||
+									_wcsnicmp(p, L"RecentDocs", 10) == 0 ||
+									_wcsnicmp(p, L"RunMRU", 6) == 0 ||
+									_wcsnicmp(p, L"TypedPaths", 10) == 0) {
+								key_kind = 2;
 								break;
 							}
 						}
@@ -565,16 +706,65 @@ HOOKDEF(LONG, WINAPI, RegEnumValueW,
 				}
 			}
 		}
+	}
 
-		if (is_appswitched) {
+	/* Keep MRUListEx consistent with the padded entry count: most-recent-first
+	   indices 23..0 followed by the 0xFFFFFFFF terminator. */
+	if (key_kind == 2 && ret == ERROR_SUCCESS && lpValueName != NULL &&
+			lpData != NULL && lpcbData != NULL &&
+			_wcsnicmp(lpValueName, L"MRUListEx", 10) == 0 &&
+			*lpcbData >= (MIRAGE_MIN_ENTRIES + 1) * sizeof(DWORD)) {
+		get_lasterrors(&lasterror);
+		for (i = 0; i < (int)MIRAGE_MIN_ENTRIES; i++)
+			listex[i] = MIRAGE_MIN_ENTRIES - 1 - (DWORD)i;
+		listex[MIRAGE_MIN_ENTRIES] = 0xFFFFFFFF;
+		memcpy(lpData, listex, (MIRAGE_MIN_ENTRIES + 1) * sizeof(DWORD));
+		*lpcbData = (DWORD)((MIRAGE_MIN_ENTRIES + 1) * sizeof(DWORD));
+		if (lpType != NULL)
+			*lpType = REG_BINARY;
+		set_lasterrors(&lasterror);
+	}
+
+	if (key_kind != 0 && ret == ERROR_NO_MORE_ITEMS &&
+			lpValueName != NULL && lpcchValueName != NULL) {
+		value = NULL;
+		usage = 0;
+		slot = 0;
+
+		if (key_kind == 1) {
+			if (dwIndex < MIRAGE_MIN_ENTRIES) {
+				pool_total = (DWORD)(sizeof(mirage_appswitched_values) /
+					sizeof(mirage_appswitched_values[0]));
+				value = mirage_appswitched_values[dwIndex % pool_total];
+				/* plausible, index-varying switch count */
+				usage = 5 + dwIndex * 2;
+			}
+		} else {
+			/* One enumeration slot in a ComDlg32 MRU key is taken by
+			   MRUListEx, so the numbered value at enumeration index i is
+			   conventionally named i-1; continuing that numbering keeps the
+			   synthetic names from colliding with the real ones. */
+			slot = (dwIndex >= 1) ? (dwIndex - 1) : 0;
+			if (slot < MIRAGE_MIN_ENTRIES) {
+				n = slot;
+				t = 0;
+				if (n == 0)
+					digits[t++] = L'0';
+				while (n != 0) {
+					digits[t++] = (wchar_t)(L'0' + (n % 10));
+					n /= 10;
+				}
+				i = 0;
+				while (t > 0)
+					namebuf[i++] = digits[--t];
+				namebuf[i] = L'\0';
+				value = namebuf;
+			}
+		}
+
+		if (value != NULL) {
 			get_lasterrors(&lasterror);
-
-			pool_total = (DWORD)(sizeof(mirage_appswitched_values) /
-				sizeof(mirage_appswitched_values[0]));
-			value = mirage_appswitched_values[dwIndex % pool_total];
 			value_chars = (DWORD)wcslen(value);
-			/* plausible, index-varying switch count */
-			usage = 5 + dwIndex * 2;
 
 			if (*lpcchValueName > value_chars) {
 				/* room for the name plus its terminating NUL */
@@ -582,24 +772,48 @@ HOOKDEF(LONG, WINAPI, RegEnumValueW,
 					((size_t)value_chars + 1) * sizeof(wchar_t));
 				*lpcchValueName = value_chars;
 
-				if (lpType != NULL)
-					*lpType = REG_DWORD;
-
-				if (lpData != NULL && lpcbData != NULL) {
-					if (*lpcbData >= sizeof(DWORD)) {
-						memcpy(lpData, &usage, sizeof(DWORD));
-						*lpcbData = sizeof(DWORD);
-						ret = ERROR_SUCCESS;
+				if (key_kind == 1) {
+					if (lpType != NULL)
+						*lpType = REG_DWORD;
+					if (lpData != NULL && lpcbData != NULL) {
+						if (*lpcbData >= sizeof(DWORD)) {
+							memcpy(lpData, &usage, sizeof(DWORD));
+							*lpcbData = sizeof(DWORD);
+							ret = ERROR_SUCCESS;
+						} else {
+							/* caller's data buffer too small: report the
+							   required size, matching RegEnumValue */
+							*lpcbData = sizeof(DWORD);
+							ret = ERROR_MORE_DATA;
+						}
 					} else {
-						/* caller's data buffer too small: report
-						   the required size, matching RegEnumValue */
-						*lpcbData = sizeof(DWORD);
-						ret = ERROR_MORE_DATA;
+						if (lpcbData != NULL)
+							*lpcbData = sizeof(DWORD);
+						ret = ERROR_SUCCESS;
 					}
 				} else {
-					if (lpcbData != NULL)
-						*lpcbData = sizeof(DWORD);
-					ret = ERROR_SUCCESS;
+					pidl_len = (DWORD)sizeof(mirage_mru_pidl);
+					if (lpType != NULL)
+						*lpType = REG_BINARY;
+					if (lpData != NULL && lpcbData != NULL) {
+						if (*lpcbData >= pidl_len) {
+							memcpy(pidl_buf, mirage_mru_pidl, pidl_len);
+							/* vary the opaque tail so no two synthetic
+							   pidls are byte-identical */
+							pidl_buf[pidl_len - 3] =
+								(unsigned char)(0x30 + (slot % 10));
+							memcpy(lpData, pidl_buf, pidl_len);
+							*lpcbData = pidl_len;
+							ret = ERROR_SUCCESS;
+						} else {
+							*lpcbData = pidl_len;
+							ret = ERROR_MORE_DATA;
+						}
+					} else {
+						if (lpcbData != NULL)
+							*lpcbData = pidl_len;
+						ret = ERROR_SUCCESS;
+					}
 				}
 			} else {
 				/* caller's name buffer too small: report the required
