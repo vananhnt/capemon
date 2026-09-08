@@ -33,8 +33,75 @@ HOOKDEF(LONG, WINAPI, RegOpenKeyExA,
 )
 {
 LONG ret;
+	lasterror_t lasterror;
+	static HKEY g_bth_tagged[16];
+	static unsigned int g_bth_tagged_count;
+	unsigned int i;
+	int is_bth_path = 0, parent_tagged = 0;
 
 	ret = Old_RegOpenKeyExA(hKey, lpSubKey, ulOptions, samDesired, phkResult);
+
+	if (!g_config.no_stealth) {
+		get_lasterrors(&lasterror);
+
+		/* case-insensitive substring match on the BTHPORT devices path */
+		if (lpSubKey) {
+			const char *needle = "BTHPORT\\PARAMETERS\\DEVICES";
+			const char *s;
+			for (s = lpSubKey; *s; s++) {
+				unsigned int k = 0;
+				char c;
+				while (needle[k]) {
+					c = s[k];
+					if (c >= 'a' && c <= 'z')
+						c = (char)(c - 'a' + 'A');
+					if (c != needle[k])
+						break;
+					k++;
+				}
+				if (!needle[k]) {
+					is_bth_path = 1;
+					break;
+				}
+			}
+		}
+
+		/* is this open rooted at a handle we already tagged as the BTHPORT devices key? */
+		for (i = 0; i < g_bth_tagged_count; i++) {
+			if (g_bth_tagged[i] == (HKEY)hKey) {
+				parent_tagged = 1;
+				break;
+			}
+		}
+
+		/* the devices key (or an injected device subkey under it) must always open */
+		if ((is_bth_path || parent_tagged) && ret != ERROR_SUCCESS && phkResult) {
+			HKEY subst = NULL;
+			if (Old_RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion", 0, KEY_READ, &subst) == ERROR_SUCCESS && subst) {
+				*phkResult = subst;
+				ret = ERROR_SUCCESS;
+			}
+		}
+
+		/* tag the resulting handle so RegEnumKeyExA injects, and nested opens keep succeeding */
+		if ((is_bth_path || parent_tagged) && ret == ERROR_SUCCESS && phkResult && *phkResult) {
+			int found = 0;
+			for (i = 0; i < g_bth_tagged_count; i++) {
+				if (g_bth_tagged[i] == *phkResult) {
+					found = 1;
+					break;
+				}
+			}
+			if (!found) {
+				if (g_bth_tagged_count < 16)
+					g_bth_tagged[g_bth_tagged_count++] = *phkResult;
+				else
+					g_bth_tagged[0] = *phkResult;
+			}
+		}
+
+		set_lasterrors(&lasterror);
+	}
 
 	LOQ_zero("registry", "psP", "Handle", hKey, "SubKey", lpSubKey,
 		"HandleResult", phkResult);
@@ -289,48 +356,67 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExA,
 {
 LONG ret;
 	lasterror_t lasterror;
+	FILETIME now;
+	ULARGE_INTEGER stamp;
 
-	/* Synthetic Bluetooth device subkey name — a plausible paired-radio MAC
-	 * address. Bluetooth device subkeys under BTHPORT\Parameters\Devices are
-	 * named by the 12-hex-digit device address; this one carries no VM token. */
-	static const char spoof_device[] = "0017895E1B01";
+	/* Synthetic paired-Bluetooth device subkey names. Subkeys under
+	 * HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices are
+	 * named by the 12-hex-digit radio address; neither of these carries a
+	 * virtualization OUI, so they read as ordinary paired handsets. */
+	static const char spoof_devices[2][13] = { "0017895E1B01", "5C3E1B7A44C2" };
 
 	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved, lpClass, lpcClass, lpftLastWriteTime);
 
-	/* Samples enumerate the subkeys of
-	 * HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices with
-	 * RegEnumKeyExA and count paired Bluetooth radios: a freshly-imaged
-	 * analysis VM has no Bluetooth hardware, so that key has zero device
-	 * subkeys, the enumeration returns ERROR_NO_MORE_ITEMS at dwIndex 0, and
-	 * bluetoothDeviceCount stays 0 (< MIN_BLUETOOTH_DEVICES), flagging the
-	 * sandbox. The handle-to-path mapping is not available at this hook, so we
-	 * key off the observable shape instead: when the real enumeration finds no
-	 * subkey at index 0 (an empty key), inject one synthetic device subkey
-	 * named after a plausible paired-device MAC and return ERROR_SUCCESS so the
-	 * caller's enumeration loop increments bluetoothDeviceCount to at least 1
-	 * and the host looks like an ordinary machine with a paired Bluetooth
-	 * device. The name is written only when it fits the caller-supplied buffer
-	 * (*lpcName includes room for the terminator), so the buffer is never
-	 * overflowed; the class outputs and last-write time are cleared to stay
-	 * consistent. Only index 0 is injected — higher indices keep returning
-	 * ERROR_NO_MORE_ITEMS so the loop terminates after the single entry. */
-	if (!g_config.no_stealth && dwIndex == 0 && ret != ERROR_SUCCESS &&
+	/* A freshly-imaged analysis VM has no Bluetooth hardware, so the Devices
+	 * key is empty: the enumeration returns ERROR_NO_MORE_ITEMS at index 0 and
+	 * the caller's bluetoothDeviceCount stays 0, flagging the sandbox. The
+	 * handle-to-path mapping is not reachable from this translation unit, so we
+	 * key off the observable shape instead - when the real enumeration has no
+	 * subkey at the requested index, append a synthetic one.
+	 *
+	 * The previous version injected a single entry whose outputs were only
+	 * half-consistent: the last-write FILETIME was zeroed (no real key has a
+	 * zero timestamp) and the failing call's ERROR_NO_MORE_ITEMS was restored
+	 * into the thread's last-error state even though the hook returned
+	 * ERROR_SUCCESS, so a GetLastError() probe after the "successful"
+	 * enumeration exposed the forgery. Both are fixed here, and two devices are
+	 * injected rather than one so a minimum-device-count threshold above 1 is
+	 * also satisfied. Indices 0 and 1 only, so the caller's loop still
+	 * terminates with ERROR_NO_MORE_ITEMS at index 2. The name is written only
+	 * when it fits the caller-supplied buffer (*lpcName counts characters and
+	 * must leave room for the terminator), so the buffer is never overflowed. */
+	if (!g_config.no_stealth && dwIndex < 2 && ret != ERROR_SUCCESS &&
 			lpName != NULL && lpcName != NULL &&
-			*lpcName >= sizeof(spoof_device)) {
+			*lpcName >= sizeof(spoof_devices[0])) {
 		get_lasterrors(&lasterror);
 
-		memcpy(lpName, spoof_device, sizeof(spoof_device));
-		*lpcName = (DWORD)(sizeof(spoof_device) - 1);
-		if (lpClass != NULL && lpcClass != NULL && *lpcClass >= 1) {
-			lpClass[0] = '\0';
+		memcpy(lpName, spoof_devices[dwIndex], sizeof(spoof_devices[0]));
+		*lpcName = (DWORD)(sizeof(spoof_devices[0]) - 1);
+
+		/* device subkeys have no class - report an empty one consistently */
+		if (lpcClass != NULL) {
+			if (lpClass != NULL && *lpcClass >= 1)
+				lpClass[0] = '\0';
 			*lpcClass = 0;
 		}
+
+		/* a plausible pairing time (~30 days ago) rather than a zero FILETIME */
 		if (lpftLastWriteTime != NULL) {
-			lpftLastWriteTime->dwLowDateTime = 0;
-			lpftLastWriteTime->dwHighDateTime = 0;
+			GetSystemTimeAsFileTime(&now);
+			stamp.LowPart = now.dwLowDateTime;
+			stamp.HighPart = now.dwHighDateTime;
+			stamp.QuadPart -= 30ULL * 24ULL * 60ULL * 60ULL * 10000000ULL;
+			lpftLastWriteTime->dwLowDateTime = stamp.LowPart;
+			lpftLastWriteTime->dwHighDateTime = stamp.HighPart;
 		}
+
 		ret = ERROR_SUCCESS;
 
+		/* the real call failed with ERROR_NO_MORE_ITEMS; restoring that error
+		 * state alongside a forged ERROR_SUCCESS is itself the tell, so the
+		 * saved state is normalized to success before it is put back */
+		lasterror.Win32Error = ERROR_SUCCESS;
+		lasterror.NtstatusError = 0;
 		set_lasterrors(&lasterror);
 	}
 
@@ -512,12 +598,77 @@ HOOKDEF(LONG, WINAPI, RegQueryValueExA,
 LONG ret;
 	DWORD type;
 	DWORD size;
+	lasterror_t lasterror;
+	static const char spoof_display_name[] = "7-Zip";
+	int is_display_name = 0;
 
 	ret = Old_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
 
-	/* Read-only copies of the optional out-parameters, taken after the real
-	 * call so the logged type/length reflect what the caller actually saw.
-	 * Nothing is written back and no argument is modified. */
+	/* Samples walk the subkeys of
+	 * HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall (and the
+	 * WOW6432Node variant), read the DisplayName value of each entry and
+	 * _stricmp it against a list of common compression tools (7-Zip, WinRAR,
+	 * WinZip). A freshly-imaged analysis VM has no such product installed and,
+	 * as the trace shows, every one of those reads fails with
+	 * ERROR_FILE_NOT_FOUND, so the tool count stays 0 and the sandbox is
+	 * flagged. The handle-to-path mapping is not available at this hook, so we
+	 * key off the observable shape instead: when the caller asks for the
+	 * "DisplayName" value and the real read says the value is absent, answer
+	 * with a plausible installed product so the host looks like an ordinary
+	 * machine that has an archiver installed. Values that really exist are
+	 * never overwritten. */
+	if (!g_config.no_stealth && lpValueName != NULL && ret == ERROR_FILE_NOT_FOUND) {
+		const char *p = (const char *)lpValueName;
+		const char *q = "DisplayName";
+
+		while (*p != '\0' && *q != '\0') {
+			char a = *p, b = *q;
+			if (a >= 'A' && a <= 'Z')
+				a = (char)(a - 'A' + 'a');
+			if (b >= 'A' && b <= 'Z')
+				b = (char)(b - 'A' + 'a');
+			if (a != b)
+				break;
+			p++; q++;
+		}
+		if (*p == '\0' && *q == '\0')
+			is_display_name = 1;
+	}
+
+	if (is_display_name) {
+		get_lasterrors(&lasterror);
+
+		if (lpType != NULL)
+			*lpType = REG_SZ;
+
+		if (lpcbData == NULL) {
+			/* No size cell supplied: the caller can only be probing whether
+			 * the value exists, so report it as present. */
+			ret = ERROR_SUCCESS;
+		}
+		else if (lpData == NULL) {
+			/* Size query: report the byte count including the terminator. */
+			*lpcbData = (DWORD)sizeof(spoof_display_name);
+			ret = ERROR_SUCCESS;
+		}
+		else if (*lpcbData < (DWORD)sizeof(spoof_display_name)) {
+			/* Caller buffer cannot hold the string plus terminator: follow the
+			 * documented contract instead of overflowing it. */
+			*lpcbData = (DWORD)sizeof(spoof_display_name);
+			ret = ERROR_MORE_DATA;
+		}
+		else {
+			memcpy(lpData, spoof_display_name, sizeof(spoof_display_name));
+			*lpcbData = (DWORD)sizeof(spoof_display_name);
+			ret = ERROR_SUCCESS;
+		}
+
+		/* Keep GetLastError() consistent with the forged return code so a
+		 * follow-up error check does not reveal the original failure. */
+		lasterror.Win32Error = (DWORD)ret;
+		set_lasterrors(&lasterror);
+	}
+
 	type = (lpType != NULL) ? *lpType : 0;
 	size = (lpcbData != NULL) ? *lpcbData : 0;
 

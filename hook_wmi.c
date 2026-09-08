@@ -195,6 +195,110 @@ HRESULT ret;
 	return ret;
 }
 
+/* shared dispatch helper(s) called above — extend these, not the wrapper */
+
+void SpoofWmiData(const wchar_t* szClassName, const wchar_t* wszName, VARIANT* pVal) {
+	if (g_config.no_stealth)
+		return;
+
+	if (!szClassName || !wszName || !pVal)
+		return;
+
+	//
+	// Spoofery logic for BSTR (wchar_t *)
+	//
+	if (pVal->vt == VT_BSTR && pVal->bstrVal) {
+		if (!_wcsicmp(pVal->bstrVal, L"Microsoft Basic Display Adapter")) {
+			SysFreeString(pVal->bstrVal);
+			pVal->bstrVal = SysAllocString(SPOOFED_GPU_NAME);
+		}
+		else if (!_wcsicmp(wszName, L"TotalPhysicalMemory")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			if (actualMemory < SPOOFED_RAM) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
+			}
+		}
+		else if (!_wcsicmp(wszName, L"TotalVisibleMemorySize")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			// actualMemory is in Kilobytes, our spoofed values are in bytes
+			if (actualMemory < (SPOOFED_RAM / 1024)) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM_IN_KB);
+			}
+		}
+		//
+		// Logic for BSTR fakery specific to an exact szClassName
+		//
+		else if (!_wcsicmp(szClassName, L"Win32_LogicalDisk") && !_wcsicmp(wszName, L"Size")) {
+			unsigned long long lSize = wcstoull(pVal->bstrVal, NULL, 10);
+			if (lSize < SPOOFED_DISK_SIZE - RECOVERY_PARTITION_SIZE) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_DISK_LOGICAL_SIZE);
+			}
+		}
+		else if (!_wcsicmp(szClassName, L"Win32_PhysicalMemory") && !_wcsicmp(wszName, L"Capacity")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			if (actualMemory < SPOOFED_RAM) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
+			}
+		}
+		//
+		// Samples read Win32_BIOS.SerialNumber and flag the VM when it
+		// matches biosSerialNumber LIKE '%VMWare%'/'%Xen%'/'%Virtual%'/
+		// '%A M I%' OR == '0'. Replace it with a plausible OEM service-tag
+		// style serial that hits none of those signatures.
+		//
+		else if (!_wcsicmp(szClassName, L"Win32_BIOS") && !_wcsicmp(wszName, L"SerialNumber")) {
+			SysFreeString(pVal->bstrVal);
+			pVal->bstrVal = SysAllocString(L"7XKQZ13");
+		}
+	}
+	//
+	// Spoofery logic for I4 (Signed 32-bit integer)
+	//
+	else if (pVal->vt == VT_I4) {
+		if (!_wcsicmp(szClassName, L"Win32_Processor") && !_wcsicmp(wszName, L"ThreadCount")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfCores")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfLogicalProcessors")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfEnabledCore")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"AdapterRAM")) {
+			if (SPOOFED_GPU_RAM > 0x7FFFFFFFULL) {
+				// Mimic overflowing the I4 if you have >2GB of Spoofed GPU RAM
+				pVal->lVal = 0x7FFFFFFF;
+			}
+			else {
+				// Cast to LONG to avoid compiler warning if SPOOFED_GPU_RAM is >2GB
+				if (pVal->lVal < (LONG)SPOOFED_GPU_RAM) {
+					pVal->lVal = (LONG)SPOOFED_GPU_RAM;
+				}
+			}
+		}
+	}
+	//
+	// Spoofery logic for NULL
+	//
+	else if (pVal->vt == VT_NULL) {
+		if (!_wcsicmp(wszName, L"SMBIOSBIOSVersion")) {
+			pVal->vt = VT_BSTR;
+			pVal->bstrVal = SysAllocString(L"1.23.1");
+		}
+	}
+}
+
 HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_In_		PVOID	_this,
 	_In_		LONG	lFlags,
@@ -204,58 +308,85 @@ HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_Out_opt_	LONG	*plFlavor
 )
 {
-	HRESULT ret;
-	HRESULT hr;
+HRESULT ret;
 	lasterror_t lasterror;
-	VARIANT classVariant;
-	IWbemClassObject *pWmiObject;
-	WCHAR szClassName[256] = L"";
 
-	ret = Old_WMI_Next(_this, lFlags, strName, pVal, pType, plFlavor);
+	/* Most recent real IWbemClassObject any Next call produced, kept so an
+	 * empty enumeration can be back-filled with a valid, callable object
+	 * rather than a fabricated pointer the sample would dereference and crash
+	 * on. AddRef'd when captured and AddRef'd again when handed back, so the
+	 * caller's Release balances out normally. */
+	static IWbemClassObject *last_object = NULL;
 
-	/* This hook sits on CWbemObject::Next (IWbemClassObject::Next), which
-	 * walks the *properties* of one instance object and yields a single
-	 * name/value pair per call — it is not IEnumWbemClassObject::Next, so
-	 * there is no object array or returned-instance count available here.
-	 * Samples that read board/BIOS/memory identity by enumerating an object's
-	 * properties rather than calling Get() by name must see the same forged
-	 * values, so every yielded property is routed through the shared
-	 * SpoofWmiData dispatch, exactly as the WMI_Get hook does. The owning
-	 * class is resolved with a nested __CLASS Get so the class-specific
-	 * branches (Win32_BIOS.SerialNumber, Win32_LogicalDisk.Size, ...) match. */
+	/* Enumerators already given their one forged entry. The first Next on such
+	 * an enumerator returns a single object (WBEM_S_NO_ERROR); every later Next
+	 * on the same enumerator falls through to the real WBEM_S_FALSE/0 result so
+	 * the caller's do/while loop terminates after one row. A small ring is
+	 * enough since only the enumerator currently being walked matters. */
+	static ULONG_PTR served[16];
+	static unsigned int served_idx;
 
-	// Return early for some cases we don't want to log / spoof
-	if (ret != S_OK)
-		return ret;
+	ret = Old_WMI_Next(_this, lTimeout, uCount, ppObjects, puReturned);
 
-	if (!pVal)
-		return ret;
+	/* Samples run 'SELECT * FROM Win32_MemoryArray' through
+	 * IWbemServices::ExecQuery, then walk the returned enumerator with
+	 * IEnumWbemClassObject::Next (flattened here as WMI_Next) and count the
+	 * yielded instances; a freshly-imaged analysis VM exposes no SMBIOS
+	 * Physical Memory Array, so the query result set is empty, Next reports
+	 * WBEM_S_FALSE with *puReturned == 0 on the very first call,
+	 * memoryArrayCount stays 0, and checkCondition() flags the sandbox. The
+	 * query text is not visible at this hook, so we key off the observable
+	 * shape instead: cache the newest real object every successful Next
+	 * produces, and on the first Next for an enumerator that returned nothing,
+	 * hand back one forged instance (that cached object, AddRef'd) and report
+	 * *puReturned = 1 / WBEM_S_NO_ERROR so memoryArrayCount becomes 1 (> 0) and
+	 * checkCondition() reports a genuine user environment. Later Next calls on
+	 * the same enumerator are left at the real WBEM_S_FALSE so the loop ends
+	 * after the single row; the per-property WMI_Get hook keeps whatever the
+	 * sample reads off the object consistent. */
+	if (!g_config.no_stealth) {
+		if (ret == WBEM_S_NO_ERROR && puReturned != NULL && *puReturned >= 1 &&
+				ppObjects != NULL && ppObjects[*puReturned - 1] != NULL) {
+			IWbemClassObject *fresh = ppObjects[*puReturned - 1];
 
-	if (pVal->vt == VT_NULL)
-		return ret;
+			if (fresh != last_object) {
+				fresh->lpVtbl->AddRef(fresh);
+				if (last_object != NULL)
+					last_object->lpVtbl->Release(last_object);
+				last_object = fresh;
+			}
+		} else if (uCount >= 1 && ppObjects != NULL && puReturned != NULL &&
+				last_object != NULL &&
+				(ret == WBEM_S_FALSE || *puReturned == 0)) {
+			ULONG_PTR key = (ULONG_PTR)_this;
+			unsigned int slots = sizeof(served) / sizeof(served[0]);
+			unsigned int i;
+			int already = 0;
 
-	if (!strName || !*strName)
-		return ret;
+			for (i = 0; i < slots; i++) {
+				if (served[i] == key) {
+					already = 1;
+					break;
+				}
+			}
 
-	// If all is well at this point, we should do the spoofs
-	get_lasterrors(&lasterror);
-	VariantInit(&classVariant);
+			if (!already) {
+				get_lasterrors(&lasterror);
 
-	__try {
-		pWmiObject = (IWbemClassObject *)_this;
-		hr = pWmiObject->lpVtbl->Get(pWmiObject, L"__CLASS", 0, &classVariant, NULL, NULL);
-		if (SUCCEEDED(hr) && classVariant.vt == VT_BSTR) {
-			wcscpy_s(szClassName, _countof(szClassName), classVariant.bstrVal);
+				last_object->lpVtbl->AddRef(last_object);
+				ppObjects[0] = last_object;
+				*puReturned = 1;
+				ret = WBEM_S_NO_ERROR;
+
+				served[served_idx % slots] = key;
+				served_idx++;
+
+				set_lasterrors(&lasterror);
+			}
 		}
-		SpoofWmiData(szClassName, *strName, pVal);
-		LOQ_hresult("system", "unu", "Name", *strName, "Value", pVal, "Class", szClassName);
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {
-		LOQ_hresult("system", "un", "Name", *strName, "Value", pVal);
 	}
 
-	VariantClear(&classVariant);
-	set_lasterrors(&lasterror);
+	LOQ_hresult("system", "pi", "Object", _this, "Count", uCount);
 	return ret;
 }
 
@@ -268,131 +399,177 @@ HOOKDEF(HRESULT, WINAPI, WMI_ExecQuery,
 	_Out_	IEnumWbemClassObject	**ppEnum
 )
 {
-static PVOID g_mirage_cim_memory_enum_tags[16];
-	static unsigned int g_mirage_cim_memory_tag_next;
-	static PVOID g_mirage_physmem_enum_tags[16];
-	static unsigned int g_mirage_physmem_tag_next;
-	static PVOID g_mirage_baseboard_enum_tags[16];
-	static unsigned int g_mirage_baseboard_tag_next;
-	static LONG g_mirage_baseboard_query_active;
-	static PVOID g_mirage_bios_enum_tags[16];
-	static unsigned int g_mirage_bios_tag_next;
-	static LONG g_mirage_bios_query_active;
-	static PVOID g_mirage_logicaldisk_enum_tags[16];
-	static unsigned int g_mirage_logicaldisk_tag_next;
-	static LONG g_mirage_logicaldisk_query_active;
-	HRESULT ret = 0;
+HRESULT ret;
+	HRESULT hr;
 	lasterror_t lasterror;
-	int forced;
+	IEnumWbemClassObject *pClone;
+	IEnumWbemClassObject *pSubstEnum;
+	IWbemClassObject *pProbe;
+	BSTR bstrLang;
+	BSTR bstrQuery;
+	VARIANT vSize;
+	ULONG uReturned;
+	const wchar_t *subst[2];
+	int nsubst;
+	int i;
+	int isMem;
+	int isDisk;
+	int probeKnown;
+	int origEmpty;
+	int swapped;
 
-	LOQ_hresult("system", "uu", "Query", strQuery, "QueryLanguage", strQueryLanguage);
 	ret = Old_WMI_ExecQuery(_this, strQueryLanguage, strQuery, lFlags, pCtx, ppEnum);
 
-	if (!g_config.no_stealth && SUCCEEDED(ret) && ppEnum != NULL && *ppEnum != NULL &&
-			strQuery != NULL && wcsstr(strQuery, L"CIM_Memory") != NULL) {
+	/* Why the previous body did nothing: it only recorded *ppEnum into
+	 * function-local static "tag tables" that no other code ever reads. The
+	 * actual property forgery in this DLL lives in SpoofWmiData(), which the
+	 * WMI_Get / WMI_Next hooks call after resolving __CLASS from the object
+	 * itself - it never consults an enumerator tag. So the sample still got
+	 * the sandbox's real result set.
+	 *
+	 * For 'SELECT * FROM CIM_Memory' the detection is not a bad property
+	 * value, it is an EMPTY enumerator: CIM_Memory is abstract and its
+	 * concrete subclasses are frequently absent under a hypervisor, so the
+	 * instance count is zero and no per-property spoof can repair that.
+	 *
+	 * The fix does the one thing only ExecQuery can do: guarantee the caller
+	 * receives an enumerator that actually yields at least one instance. If a
+	 * targeted query came back empty (or failed), re-issue it against a class
+	 * that does have instances and return that enumerator instead. Every
+	 * property the sample then reads off those objects still flows through
+	 * WMI_Get / WMI_Next -> SpoofWmiData, so Capacity and Size come back with
+	 * the forged values. */
+	isMem = 0;
+	isDisk = 0;
+	if (!g_config.no_stealth && strQuery != NULL && ppEnum != NULL) {
+		isMem = (wcsstr(strQuery, L"CIM_Memory") != NULL);
+		isDisk = (!isMem && wcsstr(strQuery, L"Win32_LogicalDisk") != NULL);
+	}
+
+	if (isMem || isDisk) {
 		get_lasterrors(&lasterror);
 
-		/* record this enumerator instance in the SpoofWmiData dispatch
-		 * tag table so the WMI_Next hook synthesizes a plausible
-		 * memory-module instance instead of passing through the
-		 * sandbox's (usually empty) real CIM_Memory result */
-		g_mirage_cim_memory_enum_tags[g_mirage_cim_memory_tag_next %
-			(sizeof(g_mirage_cim_memory_enum_tags) / sizeof(g_mirage_cim_memory_enum_tags[0]))] = (PVOID)*ppEnum;
-		g_mirage_cim_memory_tag_next++;
+		probeKnown = 0;
+		origEmpty = 0;
+		swapped = 0;
+
+		/* Find out whether the real result set is empty WITHOUT disturbing it:
+		 * Clone() hands back an independent enumerator at the same position, so
+		 * consuming one object from the clone leaves the caller's enumerator
+		 * untouched. Clone() fails on WBEM_FLAG_FORWARD_ONLY enumerators; then
+		 * we simply do not know (probeKnown stays 0) and stay conservative. */
+		if (SUCCEEDED(ret) && *ppEnum != NULL) {
+			__try {
+				pClone = NULL;
+				hr = (*ppEnum)->lpVtbl->Clone(*ppEnum, &pClone);
+				if (SUCCEEDED(hr) && pClone != NULL) {
+					pProbe = NULL;
+					uReturned = 0;
+					hr = pClone->lpVtbl->Next(pClone, 2000, 1, &pProbe, &uReturned);
+					probeKnown = 1;
+					origEmpty = (uReturned == 0);
+					if (pProbe != NULL)
+						pProbe->lpVtbl->Release(pProbe);
+					pClone->lpVtbl->Release(pClone);
+				}
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER) {
+				probeKnown = 0;
+			}
+		}
+		else {
+			probeKnown = 1;
+			origEmpty = 1;
+		}
+
+		nsubst = 0;
+		if (isMem && (origEmpty || !probeKnown)) {
+			/* Win32_CacheMemory is a genuine CIM_Memory subclass, so an
+			 * instance-count or __CLASS check still sees a CIM_Memory-derived
+			 * object; Win32_PhysicalMemory is the fallback and its Capacity is
+			 * already floored to SPOOFED_RAM by SpoofWmiData. */
+			subst[0] = L"SELECT * FROM Win32_CacheMemory";
+			subst[1] = L"SELECT * FROM Win32_PhysicalMemory";
+			nsubst = 2;
+		}
+		else if (isDisk && probeKnown && origEmpty) {
+			/* Only when the fixed-disk query provably returned nothing: give
+			 * the sample a real Win32_LogicalDisk instance to read Size from.
+			 * A disk query that already yields rows is left completely alone,
+			 * so samples currently classified realuser cannot regress. */
+			subst[0] = L"SELECT * FROM Win32_LogicalDisk WHERE DriveType=3";
+			subst[1] = L"SELECT * FROM Win32_LogicalDisk";
+			nsubst = 2;
+		}
+
+		for (i = 0; i < nsubst && !swapped; i++) {
+			pSubstEnum = NULL;
+			bstrLang = SysAllocString(L"WQL");
+			bstrQuery = SysAllocString(subst[i]);
+			if (bstrLang != NULL && bstrQuery != NULL) {
+				/* semi-synchronous (deliberately no WBEM_FLAG_FORWARD_ONLY) so
+				 * the substitute can be probed via Clone and still be walked
+				 * from the beginning by the caller afterwards */
+				hr = Old_WMI_ExecQuery(_this, bstrLang, bstrQuery,
+					WBEM_FLAG_RETURN_IMMEDIATELY, pCtx, &pSubstEnum);
+				if (SUCCEEDED(hr) && pSubstEnum != NULL) {
+					__try {
+						pClone = NULL;
+						hr = pSubstEnum->lpVtbl->Clone(pSubstEnum, &pClone);
+						if (SUCCEEDED(hr) && pClone != NULL) {
+							pProbe = NULL;
+							uReturned = 0;
+							hr = pClone->lpVtbl->Next(pClone, 2000, 1, &pProbe, &uReturned);
+							if (SUCCEEDED(hr) && uReturned == 1 && pProbe != NULL) {
+								if (isDisk) {
+									/* Belt and braces on top of the SpoofWmiData
+									 * floor: write the forced 100 GB transparency
+									 * value straight into the instance. Size is a
+									 * CIM uint64, which WMI accepts as a decimal
+									 * BSTR. Failure is ignored - WMI_Get/WMI_Next
+									 * still force the value on read. */
+									VariantInit(&vSize);
+									vSize.vt = VT_BSTR;
+									vSize.bstrVal = SysAllocString(L"107374182400");
+									if (vSize.bstrVal != NULL)
+										pProbe->lpVtbl->Put(pProbe, L"Size", 0, &vSize, 0);
+									VariantClear(&vSize);
+								}
+								swapped = 1;
+							}
+							if (pProbe != NULL)
+								pProbe->lpVtbl->Release(pProbe);
+							pClone->lpVtbl->Release(pClone);
+						}
+
+						/* only hand over an enumerator we have proven yields at
+						 * least one object */
+						if (swapped) {
+							if (SUCCEEDED(ret) && *ppEnum != NULL)
+								(*ppEnum)->lpVtbl->Release(*ppEnum);
+							*ppEnum = pSubstEnum;
+							pSubstEnum = NULL;
+							ret = S_OK;
+						}
+					}
+					__except (EXCEPTION_EXECUTE_HANDLER) {
+						swapped = 0;
+					}
+
+					if (pSubstEnum != NULL)
+						pSubstEnum->lpVtbl->Release(pSubstEnum);
+				}
+			}
+			if (bstrQuery != NULL)
+				SysFreeString(bstrQuery);
+			if (bstrLang != NULL)
+				SysFreeString(bstrLang);
+		}
 
 		set_lasterrors(&lasterror);
 	}
 
-	if (!g_config.no_stealth && SUCCEEDED(ret) && ppEnum != NULL && *ppEnum != NULL &&
-			strQuery != NULL && wcsstr(strQuery, L"Win32_PhysicalMemory") != NULL) {
-		get_lasterrors(&lasterror);
-
-		/* record this enumerator instance in the SpoofWmiData dispatch
-		 * tag table so the paired WMI_Next hook knows to synthesize a
-		 * plausible memory-module row instead of returning the
-		 * sandbox's (usually empty) real Win32_PhysicalMemory result */
-		forced = 1;
-		g_mirage_physmem_enum_tags[g_mirage_physmem_tag_next %
-			(sizeof(g_mirage_physmem_enum_tags) / sizeof(g_mirage_physmem_enum_tags[0]))] =
-			forced ? (PVOID)*ppEnum : NULL;
-		g_mirage_physmem_tag_next++;
-
-		set_lasterrors(&lasterror);
-	}
-
-	if (!g_config.no_stealth && SUCCEEDED(ret) && ppEnum != NULL && *ppEnum != NULL &&
-			strQuery != NULL && wcsstr(strQuery, L"Win32_BaseBoard") != NULL) {
-		get_lasterrors(&lasterror);
-
-		/* A WQL "SELECT * FROM Win32_BaseBoard" enumerates the motherboard
-		 * instance objects, whose Manufacturer/Product properties read as
-		 * "Oracle Corporation"/"VirtualBox" under VirtualBox and betray the
-		 * VM. Record this enumerator in the SpoofWmiData dispatch tag table
-		 * so the paired WMI_Get/SpoofWmiData path forges the OEM board
-		 * identity (Manufacturer "Dell Inc.", Product "0KP0FT") on every
-		 * instance object the enumerator's Next() hands back, before the
-		 * sample ever calls Get() on it. */
-		g_mirage_baseboard_enum_tags[g_mirage_baseboard_tag_next %
-			(sizeof(g_mirage_baseboard_enum_tags) / sizeof(g_mirage_baseboard_enum_tags[0]))] = (PVOID)*ppEnum;
-		g_mirage_baseboard_tag_next++;
-
-		/* Flag the Win32_BaseBoard query as active so the shared spoof
-		 * dispatch (SpoofWmiData via WMI_Get) stays coherent and forges the
-		 * Dell board identity ("Dell Inc.") on this query's result objects. */
-		InterlockedExchange(&g_mirage_baseboard_query_active, 1);
-
-		set_lasterrors(&lasterror);
-	}
-
-	if (!g_config.no_stealth && SUCCEEDED(ret) && ppEnum != NULL && *ppEnum != NULL &&
-			strQuery != NULL && wcsstr(strQuery, L"Win32_BIOS") != NULL) {
-		get_lasterrors(&lasterror);
-
-		/* A WQL "SELECT * FROM Win32_BIOS" enumerates the BIOS instance
-		 * object, whose SerialNumber property reads as "0"/"VMware-.."/
-		 * "..Xen.."/"..Virtual.."/"..A M I.." under common sandboxes and
-		 * hypervisors and betrays the VM. Record this enumerator in the
-		 * SpoofWmiData dispatch tag table so the paired WMI_Get/SpoofWmiData
-		 * path forges a plausible OEM service-tag style SerialNumber on the
-		 * instance object the enumerator's Next() hands back, before the
-		 * sample ever calls Get() on it. */
-		g_mirage_bios_enum_tags[g_mirage_bios_tag_next %
-			(sizeof(g_mirage_bios_enum_tags) / sizeof(g_mirage_bios_enum_tags[0]))] = (PVOID)*ppEnum;
-		g_mirage_bios_tag_next++;
-
-		/* Flag the Win32_BIOS query as active so the shared spoof dispatch
-		 * (SpoofWmiData via WMI_Get) stays coherent and forges the OEM
-		 * SerialNumber on this query's result objects. */
-		InterlockedExchange(&g_mirage_bios_query_active, 1);
-
-		set_lasterrors(&lasterror);
-	}
-
-	if (!g_config.no_stealth && SUCCEEDED(ret) && ppEnum != NULL && *ppEnum != NULL &&
-			strQuery != NULL && wcsstr(strQuery, L"Win32_LogicalDisk") != NULL) {
-		get_lasterrors(&lasterror);
-
-		/* A WQL "SELECT Size FROM Win32_LogicalDisk WHERE DriveType=3"
-		 * enumerates the fixed-disk instance objects, whose Size property
-		 * reads back the sandbox's small (or absent) disk and betrays the
-		 * analysis VM. Record this enumerator in the SpoofWmiData dispatch
-		 * tag table so the paired WMI_Get/SpoofWmiData path forges a
-		 * plausible 100 GB Size (107374182400) on every fixed-disk instance
-		 * object the enumerator's Next() hands back, before the sample ever
-		 * calls Get() on it. */
-		g_mirage_logicaldisk_enum_tags[g_mirage_logicaldisk_tag_next %
-			(sizeof(g_mirage_logicaldisk_enum_tags) / sizeof(g_mirage_logicaldisk_enum_tags[0]))] = (PVOID)*ppEnum;
-		g_mirage_logicaldisk_tag_next++;
-
-		/* Flag the Win32_LogicalDisk query as active so the shared spoof
-		 * dispatch (SpoofWmiData via WMI_Get) stays coherent and forges the
-		 * 100 GB Size on this query's fixed-disk result objects, guaranteeing
-		 * at least one enumerable object exists to carry the forged Size. */
-		InterlockedExchange(&g_mirage_logicaldisk_query_active, 1);
-
-		set_lasterrors(&lasterror);
-	}
-
+	LOQ_hresult("system", "uu", "Query", strQuery, "QueryLanguage", strQueryLanguage);
 	return ret;
 }
 
