@@ -398,8 +398,8 @@ LONG ret;
 	 * forwards to the original function and returns its result completely
 	 * unmodified. It logs the real arguments and return value for analysis
 	 * visibility but alters no output buffers or arguments. */
-	ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcchName, lpReserved,
-		lpClass, lpcchClass, lpftLastWriteTime);
+	ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcName, lpReserved,
+		lpClass, lpcClass, lpftLastWriteTime);
 
 	LOQ_zero("registry", "piu", "Handle", hKey, "Index", dwIndex, "Name",
 		(ret == ERROR_SUCCESS && lpName != NULL) ? lpName : L"");
