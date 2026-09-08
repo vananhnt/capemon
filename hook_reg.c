@@ -295,7 +295,7 @@ LONG ret;
 	 * named by the 12-hex-digit device address; this one carries no VM token. */
 	static const char spoof_device[] = "0017895E1B01";
 
-	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
+	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved, lpClass, lpcClass, lpftLastWriteTime);
 
 	/* Samples enumerate the subkeys of
 	 * HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices with
@@ -310,20 +310,20 @@ LONG ret;
 	 * caller's enumeration loop increments bluetoothDeviceCount to at least 1
 	 * and the host looks like an ordinary machine with a paired Bluetooth
 	 * device. The name is written only when it fits the caller-supplied buffer
-	 * (*lpcchName includes room for the terminator), so the buffer is never
+	 * (*lpcName includes room for the terminator), so the buffer is never
 	 * overflowed; the class outputs and last-write time are cleared to stay
 	 * consistent. Only index 0 is injected — higher indices keep returning
 	 * ERROR_NO_MORE_ITEMS so the loop terminates after the single entry. */
 	if (!g_config.no_stealth && dwIndex == 0 && ret != ERROR_SUCCESS &&
-			lpName != NULL && lpcchName != NULL &&
-			*lpcchName >= sizeof(spoof_device)) {
+			lpName != NULL && lpcName != NULL &&
+			*lpcName >= sizeof(spoof_device)) {
 		get_lasterrors(&lasterror);
 
 		memcpy(lpName, spoof_device, sizeof(spoof_device));
-		*lpcchName = (DWORD)(sizeof(spoof_device) - 1);
-		if (lpClass != NULL && lpcchClass != NULL && *lpcchClass >= 1) {
+		*lpcName = (DWORD)(sizeof(spoof_device) - 1);
+		if (lpClass != NULL && lpcClass != NULL && *lpcClass >= 1) {
 			lpClass[0] = '\0';
-			*lpcchClass = 0;
+			*lpcClass = 0;
 		}
 		if (lpftLastWriteTime != NULL) {
 			lpftLastWriteTime->dwLowDateTime = 0;
