@@ -66,12 +66,81 @@ HOOKDEF(HANDLE, WINAPI, CreateToolhelp32Snapshot,
 HOOKDEF(BOOL, WINAPI, Process32NextW,
 	__in HANDLE hSnapshot,
 	__out LPPROCESSENTRY32W lppe
-	) {
+	)
+{
+/* VM guest-tool / hypervisor-helper image names to hide from the
+	   snapshot walk. These are the process names malware iterates over with
+	   _stricmp(szExeFile, kVmGuestProcessNames[i]) == 0 to detect that it is
+	   running inside VirtualBox, VMware, QEMU, Parallels or Xen; leaving any
+	   of them visible lets the sample's match loop fire and take its
+	   VM-detected branch. Matching here is a case-insensitive compare against
+	   PROCESSENTRY32W.szExeFile. */
+	static const wchar_t *hide_names[] = {
+		L"vboxservice.exe",
+		L"vboxtray.exe",
+		L"vmtoolsd.exe",
+		L"vmwaretray.exe",
+		L"vmwareuser.exe",
+		L"vmacthlp.exe",
+		L"vmusrvc.exe",
+		L"qemu-ga.exe",
+		L"vgauthservice.exe",
+		L"vboxcontrol.exe",
+		L"prl_tools.exe",
+		L"prl_cc.exe",
+		L"prltoolsd.exe",
+		L"xenservice.exe",
+		L"vmsrvc.exe",
+	};
 	BOOL ret = Old_Process32NextW(hSnapshot, lppe);
+	lasterror_t lasterror;
+	unsigned int i;
+	unsigned int n;
+	int is_hidden;
 
 	/* skip returning protected processes */
 	while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
 		ret = Old_Process32NextW(hSnapshot, lppe);
+
+	/* Samples enumerate every running process from
+	 * CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS) and walk it with
+	 * Process32NextW, comparing each PROCESSENTRY32W.szExeFile against a table
+	 * of VM guest-tool / hypervisor-helper image names
+	 * (_stricmp(szExeFile, kVmGuestProcessNames[i]) == 0). A single match
+	 * proves the host is a VirtualBox/VMware/QEMU/Parallels/Xen guest and
+	 * steers the sample into its VM-detected branch. Filter those guest-tool
+	 * entries out of the returned snapshot by advancing to the next non-VM
+	 * entry: whenever the genuine Process32NextW hands back a hidden image
+	 * name, transparently call the original again until a real, non-VM process
+	 * (or the genuine end-of-enumeration) is reached. The sample's match loop
+	 * therefore never sees a VM guest-tool name and takes its user-environment
+	 * branch. Real, non-VM processes pass through untouched. lasterror is
+	 * preserved around the forged response. */
+	if (!g_config.no_stealth && lppe != NULL) {
+		get_lasterrors(&lasterror);
+
+		n = sizeof(hide_names) / sizeof(hide_names[0]);
+		is_hidden = 1;
+
+		while (ret && is_hidden) {
+			is_hidden = 0;
+			for (i = 0; i < n; i++) {
+				if (_wcsicmp(lppe->szExeFile, hide_names[i]) == 0) {
+					is_hidden = 1;
+					break;
+				}
+			}
+
+			if (is_hidden) {
+				ret = Old_Process32NextW(hSnapshot, lppe);
+				/* keep honouring the protected-process filter as we advance */
+				while (ret && is_protected_pid(lppe->th32ProcessID))
+					ret = Old_Process32NextW(hSnapshot, lppe);
+			}
+		}
+
+		set_lasterrors(&lasterror);
+	}
 
 	if (ret)
 		LOQ_bool("process", "ui", "ProcessName", lppe->szExeFile, "ProcessId", lppe->th32ProcessID);
@@ -84,12 +153,80 @@ HOOKDEF(BOOL, WINAPI, Process32NextW,
 HOOKDEF(BOOL, WINAPI, Process32FirstW,
 	__in HANDLE hSnapshot,
 	__out LPPROCESSENTRY32W lppe
-	) {
-	BOOL ret = Old_Process32FirstW(hSnapshot, lppe);
+	)
+{
+/* VM guest-tool / hypervisor-helper image names to hide from the
+	   snapshot walk. Identical to the table the Process32NextW hook uses, so
+	   the enumeration entry point and the continuation agree on exactly which
+	   processes count as VM tells. Malware iterates over these with
+	   _stricmp(szExeFile, kVmGuestProcessNames[i]) == 0 to detect
+	   VirtualBox/VMware/QEMU/Parallels/Xen; matching here is a case-insensitive
+	   compare against PROCESSENTRY32W.szExeFile. */
+	static const wchar_t *hide_names[] = {
+		L"vboxservice.exe",
+		L"vboxtray.exe",
+		L"vmtoolsd.exe",
+		L"vmwaretray.exe",
+		L"vmwareuser.exe",
+		L"vmacthlp.exe",
+		L"vmusrvc.exe",
+		L"qemu-ga.exe",
+		L"vgauthservice.exe",
+		L"vboxcontrol.exe",
+		L"prl_tools.exe",
+		L"prl_cc.exe",
+		L"prltoolsd.exe",
+		L"xenservice.exe",
+		L"vmsrvc.exe",
+	};
+	BOOL ret;
+	lasterror_t lasterror;
+	unsigned int i;
+	unsigned int n;
+	int is_hidden;
+
+	ret = Old_Process32FirstW(hSnapshot, lppe);
 
 	/* skip returning protected processes */
 	while (ret && lppe && is_protected_pid(lppe->th32ProcessID))
 		ret = Old_Process32NextW(hSnapshot, lppe);
+
+	/* Process32FirstW is the entry point of the CreateToolhelp32Snapshot
+	 * (TH32CS_SNAPPROCESS) walk: samples read the very first PROCESSENTRY32W
+	 * here and then continue with Process32NextW, comparing every szExeFile
+	 * against a table of VM guest-tool / hypervisor-helper image names
+	 * (_stricmp(szExeFile, kVmGuestProcessNames[i]) == 0). A single match
+	 * proves the host is a VirtualBox/VMware/QEMU/Parallels/Xen guest. The
+	 * companion Process32NextW hook already filters those names out of the
+	 * continuation, but if a VM guest-tool process happens to be the first
+	 * entry of the snapshot it would leak here before that filtering begins.
+	 * Cover the entry point too: when the genuine first entry is a hidden VM
+	 * name, transparently forward to the filtered Process32Next walk — advance
+	 * with the original Process32NextW until a real, non-VM process (or the
+	 * genuine end-of-enumeration) is reached — so the very first returned entry
+	 * is never a VM process. Real, non-VM first entries pass through untouched.
+	 * lasterror is preserved around the forged response. */
+	if (!g_config.no_stealth && lppe != NULL) {
+		get_lasterrors(&lasterror);
+
+		n = sizeof(hide_names) / sizeof(hide_names[0]);
+		is_hidden = 1;
+
+		while (ret && is_hidden) {
+			is_hidden = 0;
+			for (i = 0; i < n; i++) {
+				if (_wcsicmp(lppe->szExeFile, hide_names[i]) == 0) {
+					is_hidden = 1;
+					break;
+				}
+			}
+
+			if (is_hidden)
+				ret = Old_Process32NextW(hSnapshot, lppe);
+		}
+
+		set_lasterrors(&lasterror);
+	}
 
 	if (ret)
 		LOQ_bool("process", "ui", "ProcessName", lppe->szExeFile, "ProcessId", lppe->th32ProcessID);
