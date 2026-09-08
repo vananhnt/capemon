@@ -1481,6 +1481,62 @@ HOOKDEF(HANDLE, WINAPI, FindFirstFileExW,
 	return ret;
 }
 
+/* Cursor into the synthesised C:\$Recycle.Bin enumeration. The FindFirstFileW
+ * hook (hook_mirage.c) resets it and emits entry 0; the FindNextFileW hook
+ * below continues from there, so the two halves share one position. */
+LONG g_mirage_recyclebin_index;
+
+/* Total synthetic entries: 120 $I metadata files, each paired with its $R
+ * payload. The $I count alone clears the 100-item threshold samples check. */
+#define MIRAGE_RECYCLEBIN_ENTRIES 240
+
+/* Writes synthetic $Recycle.Bin entry <index> into lpFindFileData. Shared by
+ * the FindFirstFileW hook in hook_mirage.c and FindNextFileW below, so both
+ * halves of the enumeration produce the same shape of entry. */
+void mirage_recyclebin_fill(LPWIN32_FIND_DATAW lpFindFileData, LONG index)
+{
+	static const wchar_t recyclebin_id_chars[] = L"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+	LONG item = index / 2;
+	LONG value = item;
+	ULARGE_INTEGER stamp;
+	FILETIME ft;
+	int i;
+
+	if (lpFindFileData == NULL)
+		return;
+
+	memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAW));
+	lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_HIDDEN;
+
+	/* $I<id>.dat carries the deletion metadata, $R<id>.dat the recycled
+	 * payload, exactly as the Vista+ Recycle Bin lays them out on disk */
+	lpFindFileData->cFileName[0] = L'$';
+	lpFindFileData->cFileName[1] = (index & 1) ? L'R' : L'I';
+	for (i = 7; i >= 2; i--) {
+		lpFindFileData->cFileName[i] = recyclebin_id_chars[value % 36];
+		value /= 36;
+	}
+	lpFindFileData->cFileName[8] = L'.';
+	lpFindFileData->cFileName[9] = L'd';
+	lpFindFileData->cFileName[10] = L'a';
+	lpFindFileData->cFileName[11] = L't';
+
+	/* $I files are a fixed 544 bytes, the $R payloads vary so the bin reads
+	 * as ordinary accumulated user deletions rather than generated filler */
+	lpFindFileData->nFileSizeLow = (index & 1) ? (DWORD)(0x2000 + item * 0x1a3) : 544;
+
+	/* spread the deletions back over the past few weeks, six hours apart */
+	GetSystemTimeAsFileTime(&ft);
+	stamp.LowPart = ft.dwLowDateTime;
+	stamp.HighPart = ft.dwHighDateTime;
+	stamp.QuadPart -= (ULONGLONG)(item + 1) * 6ull * 36000000000ull;
+	ft.dwLowDateTime = stamp.LowPart;
+	ft.dwHighDateTime = stamp.HighPart;
+	lpFindFileData->ftCreationTime = ft;
+	lpFindFileData->ftLastWriteTime = ft;
+	lpFindFileData->ftLastAccessTime = ft;
+}
+
 HOOKDEF(BOOL, WINAPI, FindNextFileW,
 	__in HANDLE hFindFile,
 	__out LPWIN32_FIND_DATAW lpFindFileData
@@ -1494,6 +1550,36 @@ static const wchar_t *g_mirage_taskbar_fake_names_w[] = {
 	BOOL ret;
 	lasterror_t lasterror;
 	unsigned int fake_total;
+
+	/* Continuation of the synthesised C:\$Recycle.Bin walk that backs the
+	 * shell's IShellFolder::EnumObjects / IEnumIDList::Next enumeration:
+	 * samples count the $I* metadata entries the Recycle Bin yields and treat
+	 * fewer than 100 deleted items as a freshly-imaged analysis VM with no
+	 * user history. The sentinel handle 0x00000003 never came from the real
+	 * FindFirstFileW - it is the one our FindFirstFileW hook handed back - so
+	 * the original API cannot be called with it; feed the next synthetic
+	 * entry from the shared cursor instead and return TRUE until all
+	 * MIRAGE_RECYCLEBIN_ENTRIES have been produced, then report exhaustion
+	 * the way the real API does: FALSE with ERROR_NO_MORE_FILES. */
+	if (!g_config.no_stealth && hFindFile == (HANDLE)0x00000003) {
+		get_lasterrors(&lasterror);
+
+		if (lpFindFileData != NULL &&
+				g_mirage_recyclebin_index < MIRAGE_RECYCLEBIN_ENTRIES) {
+			mirage_recyclebin_fill(lpFindFileData, g_mirage_recyclebin_index++);
+
+			ret = TRUE;
+			lasterror.Win32Error = ERROR_SUCCESS;
+		}
+		else {
+			ret = FALSE;
+			lasterror.Win32Error = ERROR_NO_MORE_FILES;
+		}
+
+		set_lasterrors(&lasterror);
+
+		return ret;
+	}
 
 	ret = Old_FindNextFileW(hFindFile, lpFindFileData);
 

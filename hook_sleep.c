@@ -141,107 +141,48 @@ docall:
 HOOKDEF(NTSTATUS, WINAPI, NtDelayExecution,
 	__in	BOOLEAN Alertable,
 	__in	PLARGE_INTEGER DelayInterval
-) {
-	NTSTATUS ret = 0;
-	LONGLONG interval;
-	FILETIME ft;
-	LARGE_INTEGER li;
+)
+{
+NTSTATUS ret;
+	LONGLONG skip_100ns;
 	LARGE_INTEGER newint;
-	unsigned long milli;
+	unsigned long milli = 0;
 	lasterror_t lasterror;
 
 	get_lasterrors(&lasterror);
 
-	if (!IsAddressAccessible(DelayInterval))
-		return STATUS_ACCESS_VIOLATION;
-
-	if (!is_aligned(DelayInterval, 4))
-		return STATUS_DATATYPE_MISALIGNMENT;
+	if (DelayInterval == NULL) {
+		ret = Old_NtDelayExecution(Alertable, DelayInterval);
+		set_lasterrors(&lasterror);
+		return ret;
+	}
 
 	newint.QuadPart = DelayInterval->QuadPart;
-	// handle INFINITE sleep
-	if (newint.QuadPart == 0x8000000000000000ULL) {
-		LOQ_ntstatus("system", "is", "Milliseconds", -1, "Status", "Infinite");
-		goto docall;
-	}
 
-	if (sleep_skip_active && newint.QuadPart > 0LL) {
-		/* convert absolute time to relative time */
-		if (Old_GetSystemTimeAsFileTime)
-			Old_GetSystemTimeAsFileTime(&ft);
-		else
-			GetSystemTimeAsFileTime(&ft);
-
-		newint.HighPart = ft.dwHighDateTime;
-		newint.LowPart = ft.dwLowDateTime;
-		newint.QuadPart += time_skipped.QuadPart;
-		newint.QuadPart -= DelayInterval->QuadPart;
-		if (newint.QuadPart > 0LL)
-			newint.QuadPart = 0LL;
-	}
-	interval = -newint.QuadPart;
-	milli = (unsigned long)(interval / 10000);
-
-	if (Old_GetSystemTimeAsFileTime)
-		Old_GetSystemTimeAsFileTime(&ft);
-	else
-		GetSystemTimeAsFileTime(&ft);
-	li.HighPart = ft.dwHighDateTime;
-	li.LowPart = ft.dwLowDateTime;
-
-	// check if we're still within the hardcoded limit
-	if (sleep_skip_active && (li.QuadPart < time_start.QuadPart + MAX_SLEEP_SKIP_DIFF * 10000)) {
-		time_skipped.QuadPart += interval;
-
-		if (num_skipped < 20) {
-			// notify how much we've skipped
-			LOQ_ntstatus("system", "is", "Milliseconds", milli, "Status", "Skipped");
-			num_skipped++;
-		}
-		else if (num_skipped == 20) {
-			LOQ_ntstatus("system", "s", "Status", "Skipped log limit reached");
-			num_skipped++;
-		}
-		goto skipcall;
-	}
-	/* clamp sleeps between 30 seconds and 1 hour down to 10 seconds  as long as we didn't force off sleep skipping */
-	else if (sleep_skip_active && milli >= 30000 && milli <= 3600000 && g_config.force_sleepskip != 0) {
-		newint.QuadPart = -(10000 * 10000);
-		time_skipped.QuadPart += interval - (10000 * 10000);
-		LOQ_ntstatus("system", "is", "Milliseconds", milli, "Status", "Skipped");
-		goto docall;
-	}
-	else if (sleep_skip_active && g_config.force_sleepskip > 0) {
-		time_skipped.QuadPart += interval;
-		LOQ_ntstatus("system", "is", "Milliseconds", milli, "Status", "Skipped");
+	/* SAGE sandbox-transparency response: NtDelayExecution is the native syscall the
+	 * Win32 Sleep() family resolves to, so a sample that issues it directly (to sidestep
+	 * a Sleep() hook) parks here with a relative DelayInterval of, e.g., ~-50000000
+	 * (5000ms in NT 100ns units; a negative interval is relative, a positive one is an
+	 * absolute deadline). Force the real syscall to return immediately by handing
+	 * Old_NtDelayExecution a zeroed interval, but advance capemon's shared faked-time
+	 * accumulator (time_skipped, NT 100ns units, which the tick/perf-counter hooks divide
+	 * back to milliseconds) by the originally requested relative interval so a tick sample
+	 * taken before and after still shows the expected elapsed delta. Only relative
+	 * (negative) intervals are shortened; an absolute deadline falls through unchanged. The
+	 * zeroed interval is passed via the local newint so the caller's DelayInterval buffer
+	 * is left untouched, and lasterror is preserved across the shortened wait. */
+	if (!g_config.no_stealth && newint.QuadPart < 0LL) {
+		skip_100ns = -newint.QuadPart;
+		time_skipped.QuadPart += skip_100ns;
+		milli = (unsigned long)(skip_100ns / 10000);
 		newint.QuadPart = 0;
-		goto docall;
-	}
-	else {
-		disable_sleep_skip();
-	}
-	if (sleep_skip_active && milli <= 10) {
-		if (num_small < 20) {
-			LOQ_ntstatus("system", "i", "Milliseconds", milli);
-			num_small++;
-		}
-		else if (num_small == 20) {
-			LOQ_ntstatus("system", "s", "Status", "Small log limit reached");
-			num_small++;
-		}
-		else {
-			// likely using a bunch of tiny sleeps to delay execution, so let's suddenly mimic high load and give our
-			// fake passage of time the impression of longer delays to return from sleep
-			time_skipped.QuadPart += (randint(500, 1000) * 10000);
-		}
+		LOQ_ntstatus("system", "is", "Milliseconds", milli, "Status", "Skipped");
 	}
 	else {
 		LOQ_ntstatus("system", "i", "Milliseconds", milli);
 	}
-docall:
-	set_lasterrors(&lasterror);
-	return Old_NtDelayExecution(Alertable, &newint);
-skipcall:
+
+	ret = Old_NtDelayExecution(Alertable, &newint);
 	set_lasterrors(&lasterror);
 	return ret;
 }
@@ -651,16 +592,19 @@ BOOL ret;
 
 	LOQ_bool("system", "");
 
-	/* Samples call GetLastInputInfo and compute the user idle time as
-	 * GetTickCount() - plii.dwTime, treating a large idle interval
-	 * (> 6000 ms) as an unattended, no-user-input sandbox and refusing to
-	 * run. A freshly-imaged analysis VM with no interactive user reports a
-	 * stale dwTime, so the computed idle time exceeds the threshold. When
-	 * the real call succeeds, forge dwTime to a very recent tick
-	 * (GetTickCount() - 100) so the sample computes an idle time of ~100 ms,
-	 * well under its 6000 ms threshold, and takes the benign user-present
-	 * branch. */
-	if (!g_config.no_stealth && ret && plii && plii->cbSize == 8) {
+	/* Samples call GetLastInputInfo to read LASTINPUTINFO.dwTime (the tick count
+	 * of the last keyboard/mouse input event) and compute the idle interval as
+	 * idle = GetTickCount() - plii->dwTime, treating idle > 6000ms (no user input
+	 * for several seconds) as proof that no real user is present — a headless,
+	 * unattended analysis VM where nothing moves the mouse or types. On such a
+	 * sandbox dwTime stays at its boot value while the tick count climbs, so the
+	 * computed idle time quickly exceeds the threshold and the sample takes the
+	 * evasive branch. After the real call succeeds, overwrite plii->dwTime with
+	 * GetTickCount() - 100 so the sample computes a ~100ms idle time, well under
+	 * the 6000ms floor, and concludes a genuine user is actively interacting with
+	 * the machine. Lasterror is preserved around the buffer edit so the forced
+	 * value leaves no other trace. */
+	if (!g_config.no_stealth && ret != FALSE && plii != NULL) {
 		get_lasterrors(&lasterror);
 
 		plii->dwTime = GetTickCount() - 100;

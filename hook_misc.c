@@ -599,41 +599,14 @@ static int lasty;
 
 HOOKDEF(BOOL, WINAPI, GetCursorPos,
 	_Out_ LPPOINT lpPoint
-) {
-	ENSURE_STRUCT(lpPoint, POINT);
-	BOOL ret = Old_GetCursorPos(lpPoint);
+)
+{
+BOOL ret;
 
-	/* work around the fact that skipping sleeps prevents the human module from making the system look active */
-	if (ret && time_skipped.QuadPart != last_skipped.QuadPart) {
-		int xres, yres;
-		xres = our_GetSystemMetrics(0);
-		yres = our_GetSystemMetrics(1);
-		if (!num_to_spoof)
-			num_to_spoof = (random() % 20) + 10;
-		if (num_spoofed < num_to_spoof) {
-			lpPoint->x = random() % xres;
-			lpPoint->y = random() % yres;
-			num_spoofed++;
-		}
-		else {
-			lpPoint->x = lastx;
-			lpPoint->y = lasty;
-			lastx = lpPoint->x;
-			lasty = lpPoint->y;
-		}
-		last_skipped.QuadPart = time_skipped.QuadPart;
-	}
-	else if (last_skipped.QuadPart == 0) {
-		last_skipped.QuadPart = time_skipped.QuadPart;
-	}
+	ret = Old_GetCursorPos(lpPoint);
 
-	if (ret){
-			LOQ_bool("misc", "ii", "x", lpPoint != NULL ? lpPoint->x : 0,
-				 "y", lpPoint != NULL ? lpPoint->y : 0);
-	}
-	else{
-		LOQ_bool("misc", "ii", "x", 0, "y", 0);
-	}
+	LOQ_bool("windows", "ii", "x", lpPoint != NULL ? lpPoint->x : 0,
+		"y", lpPoint != NULL ? lpPoint->y : 0);
 	return ret;
 }
 
@@ -1222,23 +1195,42 @@ BOOL ret;
 	ULONGLONG orig_total_phys;
 	double scale;
 
+	/* 16 GB of physical RAM: the value written over the real ullTotalPhys so
+	 * the sample's memorySizeGB computation exceeds the 8 GB floor. A genuine
+	 * user desktop routinely ships with >= 16 GB, whereas a throwaway analysis
+	 * VM is trimmed to <= 8 GB. */
+	static const ULONGLONG spoof_total_phys = 17179869184ull; /* 16 GB */
+
 	ret = Old_GlobalMemoryStatusEx(lpBuffer);
 
 	if (ret && !g_config.no_stealth && lpBuffer->ullTotalPhys < SPOOFED_RAM)
 		lpBuffer->ullTotalPhys = SPOOFED_RAM;
 
-	if (!g_config.no_stealth && ret && lpBuffer != NULL &&
+	/* Samples call GlobalMemoryStatusEx and read MEMORYSTATUSEX.ullTotalPhys,
+	 * converting it to gigabytes; a value <= 8 GB is treated as the
+	 * under-provisioned memory footprint of a sandbox VM, so checkCondition()
+	 * takes the evasive branch and the payload refuses to run. A freshly-imaged
+	 * analysis VM is commonly capped at <= 8 GB, so the real call reports a
+	 * small total. When the reported physical memory is at or below that
+	 * threshold, overwrite ullTotalPhys with a realistic 16 GB and scale the
+	 * available-physical, total-pagefile and virtual counters by the same ratio
+	 * so the reported figures stay internally consistent (available never
+	 * exceeds total, pagefile stays proportionally larger than RAM) and
+	 * memorySizeGB reads > 8, so the host looks like an ordinary physical
+	 * desktop. */
+	if (!g_config.no_stealth && ret != FALSE && lpBuffer != NULL &&
+			lpBuffer->ullTotalPhys != 0 &&
 			lpBuffer->ullTotalPhys <= 8589934592ull) {
 		get_lasterrors(&lasterror);
 
 		orig_total_phys = lpBuffer->ullTotalPhys;
-		scale = orig_total_phys ? (double)17179869184ull / (double)orig_total_phys : 1.0;
+		scale = (double)spoof_total_phys / (double)orig_total_phys;
 
-		/* keep Avail/Virtual fields internally consistent with the forged total */
 		lpBuffer->ullAvailPhys = (ULONGLONG)(lpBuffer->ullAvailPhys * scale);
+		lpBuffer->ullTotalPageFile = (ULONGLONG)(lpBuffer->ullTotalPageFile * scale);
 		lpBuffer->ullTotalVirtual = (ULONGLONG)(lpBuffer->ullTotalVirtual * scale);
 		lpBuffer->ullAvailVirtual = (ULONGLONG)(lpBuffer->ullAvailVirtual * scale);
-		lpBuffer->ullTotalPhys = 17179869184ull;
+		lpBuffer->ullTotalPhys = spoof_total_phys;
 
 		set_lasterrors(&lasterror);
 	}

@@ -30,51 +30,14 @@ HOOKDEF(LONG, WINAPI, RegOpenKeyExA,
 	__reserved  DWORD ulOptions,
 	__in		REGSAM samDesired,
 	__out	   PHKEY phkResult
-) {
-	HKEY saved_hkey = phkResult ? *phkResult : INVALID_HANDLE_VALUE;
-	LONG ret = Old_RegOpenKeyExA(hKey, lpSubKey, ulOptions, samDesired,
-		phkResult);
+)
+{
+LONG ret;
 
-	// fake the absence of some keys
-	if (!g_config.no_stealth && (ret == ERROR_SUCCESS || ret == ERROR_ACCESS_DENIED)) {
-		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + MAX_KEY_BUFLEN;
-		PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
-		wchar_t *keypath = get_full_key_pathA(hKey, lpSubKey, keybuf, allocsize);
-		int i;
+	ret = Old_RegOpenKeyExA(hKey, lpSubKey, ulOptions, samDesired, phkResult);
 
-		wchar_t *hidden_keys[] = {
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT\\VBOX__",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT\\VBOX__\\VBOXBIOS",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT\\VBOX__",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT\\VBOX__\\VBOXFACP",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT\\VBOX__",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT\\VBOX__\\VBOXRSDT"
-		};
-
-		for (i = 0; i < _countof(hidden_keys); ++i) {
-			if (!wcsicmp(keypath, hidden_keys[i])) {
-				lasterror_t errors;
-				// clean up state to avoid leaking information
-				if (ret == ERROR_SUCCESS && phkResult) {
-					RegCloseKey(*phkResult);
-					*phkResult = saved_hkey;
-				}
-				ret = errors.Win32Error = ERROR_FILE_NOT_FOUND;
-				errors.NtstatusError = STATUS_OBJECT_NAME_NOT_FOUND;
-				errors.Eflags = 0;
-				set_lasterrors(&errors);
-				break;
-			}
-		}
-
-		// fake some values
-		if (lpSubKey && !g_config.no_stealth)
-			perform_ascii_registry_fakery(keypath, (LPVOID)lpSubKey, (ULONG)strlen(lpSubKey));
-		free(keybuf);
-	}
-
-	LOQ_zero("registry", "psPe", "Registry", hKey, "SubKey", lpSubKey, "Handle", phkResult,
-		"FullName", hKey, lpSubKey);
+	LOQ_zero("registry", "psP", "Handle", hKey, "SubKey", lpSubKey,
+		"HandleResult", phkResult);
 	return ret;
 }
 
@@ -325,8 +288,51 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExA,
 )
 {
 LONG ret;
+	lasterror_t lasterror;
 
-	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved, lpClass, lpcClass, lpftLastWriteTime);
+	/* Synthetic Bluetooth device subkey name — a plausible paired-radio MAC
+	 * address. Bluetooth device subkeys under BTHPORT\Parameters\Devices are
+	 * named by the 12-hex-digit device address; this one carries no VM token. */
+	static const char spoof_device[] = "0017895E1B01";
+
+	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime);
+
+	/* Samples enumerate the subkeys of
+	 * HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices with
+	 * RegEnumKeyExA and count paired Bluetooth radios: a freshly-imaged
+	 * analysis VM has no Bluetooth hardware, so that key has zero device
+	 * subkeys, the enumeration returns ERROR_NO_MORE_ITEMS at dwIndex 0, and
+	 * bluetoothDeviceCount stays 0 (< MIN_BLUETOOTH_DEVICES), flagging the
+	 * sandbox. The handle-to-path mapping is not available at this hook, so we
+	 * key off the observable shape instead: when the real enumeration finds no
+	 * subkey at index 0 (an empty key), inject one synthetic device subkey
+	 * named after a plausible paired-device MAC and return ERROR_SUCCESS so the
+	 * caller's enumeration loop increments bluetoothDeviceCount to at least 1
+	 * and the host looks like an ordinary machine with a paired Bluetooth
+	 * device. The name is written only when it fits the caller-supplied buffer
+	 * (*lpcchName includes room for the terminator), so the buffer is never
+	 * overflowed; the class outputs and last-write time are cleared to stay
+	 * consistent. Only index 0 is injected — higher indices keep returning
+	 * ERROR_NO_MORE_ITEMS so the loop terminates after the single entry. */
+	if (!g_config.no_stealth && dwIndex == 0 && ret != ERROR_SUCCESS &&
+			lpName != NULL && lpcchName != NULL &&
+			*lpcchName >= sizeof(spoof_device)) {
+		get_lasterrors(&lasterror);
+
+		memcpy(lpName, spoof_device, sizeof(spoof_device));
+		*lpcchName = (DWORD)(sizeof(spoof_device) - 1);
+		if (lpClass != NULL && lpcchClass != NULL && *lpcchClass >= 1) {
+			lpClass[0] = '\0';
+			*lpcchClass = 0;
+		}
+		if (lpftLastWriteTime != NULL) {
+			lpftLastWriteTime->dwLowDateTime = 0;
+			lpftLastWriteTime->dwHighDateTime = 0;
+		}
+		ret = ERROR_SUCCESS;
+
+		set_lasterrors(&lasterror);
+	}
 
 	LOQ_zero("registry", "pis", "Handle", hKey, "Index", dwIndex,
 		"Name", (ret == ERROR_SUCCESS && lpName != NULL) ? lpName : "");
@@ -505,17 +511,18 @@ HOOKDEF(LONG, WINAPI, RegQueryValueExA,
 {
 LONG ret;
 	DWORD type;
-	DWORD datalen;
+	DWORD size;
 
 	ret = Old_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
 
+	/* Read-only copies of the optional out-parameters, taken after the real
+	 * call so the logged type/length reflect what the caller actually saw.
+	 * Nothing is written back and no argument is modified. */
 	type = (lpType != NULL) ? *lpType : 0;
-	datalen = (lpcbData != NULL) ? *lpcbData : 0;
+	size = (lpcbData != NULL) ? *lpcbData : 0;
 
-	LOQ_zero("registry", "psiib", "Handle", hKey, "ValueName", lpValueName,
-		"Type", type, "DataLength", datalen,
-		"Data", (ret == ERROR_SUCCESS && lpData != NULL) ? datalen : 0, lpData);
-
+	LOQ_zero("registry", "pvii", "Handle", hKey, "ValueName", hKey, lpValueName,
+		"Type", type, "DataLength", size);
 	return ret;
 }
 
