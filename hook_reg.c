@@ -349,8 +349,8 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExW,
        subkey name, and return the unmodified result verbatim. */
     LONG ret;
 
-    ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcName, lpReserved,
-        lpClass, lpcClass, lpftLastWriteTime);
+    ret = Old_RegEnumKeyExW(hKey, dwIndex, lpName, lpcchName, lpReserved,
+        lpClass, lpcchClass, lpftLastWriteTime);
 
     LOQ_zero("registry", "iu", "Index", dwIndex, "Name",
         (ret == ERROR_SUCCESS && lpName != NULL) ? lpName : L"");
@@ -535,6 +535,16 @@ LONG ret;
 	   sample's LIKE '%virtual%'/... substring scan flags. "OptiPlex 7090"
 	   is a genuine Dell OEM model containing none of those keywords. */
 	static const wchar_t forced_value[] = L"OptiPlex 7090";
+	/* Physical-vendor BIOS version string forged for the SystemBiosVersion
+	   read. A real desktop reports a concrete firmware-vendor string; a VM
+	   reports a virtualization keyword ("VBOX", "VMWARE", "QEMU",
+	   "VIRTUALBOX", "XEN", "HYPER-V", "KVM", ...) that the sample's
+	   LIKE '%vbox%'/... substring scan flags. "American Megatrends Inc. -
+	   5.11" is a genuine physical BIOS vendor string containing none of
+	   those markers. SystemBiosVersion is a REG_MULTI_SZ value, so the
+	   buffer is a double-NUL-terminated sequence: the explicit trailing \0
+	   plus the literal's implicit terminator give the required two NULs. */
+	static const wchar_t forced_bios_version[] = L"American Megatrends Inc. - 5.11\0";
 	const wchar_t *forged;
 	DWORD needed;
 	ENSURE_DWORD(lpType);
@@ -626,6 +636,53 @@ LONG ret;
 			ret = ERROR_SUCCESS;
 		} else if (*lpcbData >= needed) {
 			memcpy(lpData, forced_value, needed);
+			*lpcbData = needed;
+			ret = ERROR_SUCCESS;
+		} else {
+			/* caller's buffer is too small; report the required size so it
+			   retries with a large enough buffer */
+			*lpcbData = needed;
+			ret = ERROR_MORE_DATA;
+		}
+
+		set_lasterrors(&lasterror);
+	}
+
+	/* Samples read the REG_MULTI_SZ value SystemBiosVersion under
+	 * HKLM\HARDWARE\DESCRIPTION\System and treat the BIOS vendor string as a
+	 * sandbox tell: a virtualization marker in the string (LIKE '%vbox%',
+	 * '%vmware%','%qemu%','%virtualbox%','%xen%','%hyper-v%','%kvm%'), or an
+	 * empty/failed read, classifies the host as a VM and steers the sample
+	 * down its sandbox-detected branch. A freshly-imaged guest's BIOS version
+	 * carries exactly such a marker (or the key is absent), so the real read
+	 * fails the check. When the queried value is SystemBiosVersion, overwrite
+	 * the returned data with a REG_MULTI_SZ physical-vendor BIOS string
+	 * ("American Megatrends Inc. - 5.11") that contains none of the
+	 * virtualization markers and is never empty, and set *lpcbData to the
+	 * multi-string's byte length so the substring scan sees genuine OEM
+	 * firmware and the sample follows its real-user-environment path.
+	 * RegQueryValueExW is a two-call API (a NULL lpData sizing call followed
+	 * by the real read, and an undersized buffer reports ERROR_MORE_DATA), so
+	 * honor each phase: size queries report the needed length, adequate
+	 * buffers receive the forged string, and undersized buffers get
+	 * ERROR_MORE_DATA with the required size. lasterror is preserved around
+	 * the forged response. */
+	if (!g_config.no_stealth && lpValueName != NULL &&
+			_wcsicmp(lpValueName, L"SystemBiosVersion") == 0 &&
+			lpcbData != NULL) {
+		get_lasterrors(&lasterror);
+
+		needed = (DWORD)sizeof(forced_bios_version);
+
+		if (lpType != NULL)
+			*lpType = REG_MULTI_SZ;
+
+		if (lpData == NULL) {
+			/* sizing pass: report the byte length the forged value needs */
+			*lpcbData = needed;
+			ret = ERROR_SUCCESS;
+		} else if (*lpcbData >= needed) {
+			memcpy(lpData, forced_bios_version, needed);
 			*lpcbData = needed;
 			ret = ERROR_SUCCESS;
 		} else {
@@ -748,9 +805,9 @@ HOOKDEF(LONG, WINAPI, RegQueryInfoKeyW,
 	ULONG result_len;
 	int is_recentdocs;
 
-	ret = Old_RegQueryInfoKeyW(hKey, lpClass, lpcClass, lpReserved,
-		lpcSubKeys, lpcMaxSubKeyLen, lpcMaxClassLen, lpcValues,
-		lpcMaxValueNameLen, lpcMaxValueLen, lpcbSecurityDescriptor,
+	ret = Old_RegQueryInfoKeyW(hKey, lpClass, lpcchClass, lpReserved,
+		lpcSubKeys, lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues,
+		lpcbMaxValueNameLen, lpcbMaxValueLen, lpcbSecurityDescriptor,
 		lpftLastWriteTime);
 
 	/* Samples enumerate HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\
@@ -796,11 +853,11 @@ HOOKDEF(LONG, WINAPI, RegQueryInfoKeyW,
 		set_lasterrors(&lasterror);
 	}
 
-	LOQ_zero("registry", "pU6I", "KeyHandle", hKey, "Class", lpcClass ? *lpcClass : 0, lpClass,
-		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcMaxSubKeyLen,
-		"MaxClassLength", lpcMaxClassLen, "ValueCount", lpcValues,
-		"MaxValueNameLength", lpcMaxValueNameLen,
-		"MaxValueLength", lpcMaxValueLen);
+	LOQ_zero("registry", "pU6I", "KeyHandle", hKey, "Class", lpcchClass ? *lpcchClass : 0, lpClass,
+		"SubKeyCount", lpcSubKeys, "MaxSubKeyLength", lpcbMaxSubKeyLen,
+		"MaxClassLength", lpcbMaxClassLen, "ValueCount", lpcValues,
+		"MaxValueNameLength", lpcbMaxValueNameLen,
+		"MaxValueLength", lpcbMaxValueLen);
 	return ret;
 }
 

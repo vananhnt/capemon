@@ -7,29 +7,38 @@
 #include <tlhelp32.h>
 #include <slpublic.h>
 #include <winspool.h>
-#include <psapi.h>
 #include "log.h"
 #include "config.h"
 
-/* Case-insensitive ASCII substring search used by the FindFirstFileA hook to
- * recognise the TaskBar/Documents search masks. Returns a pointer into
- * haystack at the first match, or NULL. Takes const inputs so it accepts the
- * LPCSTR path arguments without a cast/discard-qualifier warning. */
+/* Case-insensitive ASCII substring search used by the file-enumeration hooks
+ * below to recognise a search mask. Kept local (and const-correct) here rather
+ * than reusing misc.c's stristr(), whose haystack parameter is non-const and
+ * so cannot take the LPCSTR path arguments the hooks receive. */
 static const char *mirage_stristr_ascii(const char *haystack, const char *needle)
 {
-	size_t needle_len;
-	const char *p;
+	size_t i;
+	char hc, nc;
 
 	if (haystack == NULL || needle == NULL)
 		return NULL;
-
-	needle_len = strlen(needle);
-	if (needle_len == 0)
+	if (*needle == '\0')
 		return haystack;
 
-	for (p = haystack; *p != '\0'; p++) {
-		if (_strnicmp(p, needle, needle_len) == 0)
-			return p;
+	for (; *haystack; haystack++) {
+		for (i = 0;; i++) {
+			nc = needle[i];
+			if (nc == '\0')
+				return haystack;
+			hc = haystack[i];
+			if (hc == '\0')
+				break;
+			if (hc >= 'A' && hc <= 'Z')
+				hc = (char)(hc - 'A' + 'a');
+			if (nc >= 'A' && nc <= 'Z')
+				nc = (char)(nc - 'A' + 'a');
+			if (hc != nc)
+				break;
+		}
 	}
 
 	return NULL;
@@ -72,45 +81,6 @@ static const char *mirage_stristr_ascii(const char *haystack, const char *needle
 
 	return ret;
         }
-
-    HOOKDEF(BOOL, WINAPI, QueryServiceStatusEx, SC_HANDLE hService, SC_STATUS_TYPE InfoLevel, LPBYTE lpBuffer, DWORD cbBufSize, LPDWORD pcbBytesNeeded)
-    {
-        BOOL ret;
-lasterror_t lasterror;
-SERVICE_STATUS_PROCESS *ssp;
-
-ret = Old_QueryServiceStatusEx(hService, InfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
-
-/* Samples open the Connected User Experiences and Telemetry service
- * ("DiagTrack") and query its live state with
- * QueryServiceStatusEx(SC_STATUS_PROCESS_INFO), reading the returned
- * SERVICE_STATUS_PROCESS.dwCurrentState. isServiceRunning() is true only
- * when that field equals SERVICE_RUNNING (0x00000004); a freshly-imaged
- * analysis VM frequently has DiagTrack stopped/disabled, so the state
- * reads as SERVICE_STOPPED and the check concludes the host lacks the
- * always-on telemetry service a genuine, long-lived Windows desktop runs,
- * steering the sample into its sandbox-detected branch. After the real
- * call succeeds and returns a SERVICE_STATUS_PROCESS, overwrite
- * dwCurrentState with SERVICE_RUNNING so isServiceRunning() evaluates true
- * and the sample follows its normal task-routine path. lasterror is
- * preserved around the forged response. */
-if (!g_config.no_stealth && ret && InfoLevel == SC_STATUS_PROCESS_INFO &&
-        lpBuffer != NULL && cbBufSize >= sizeof(SERVICE_STATUS_PROCESS)) {
-    get_lasterrors(&lasterror);
-
-    ssp = (SERVICE_STATUS_PROCESS *)lpBuffer;
-    ssp->dwCurrentState = SERVICE_RUNNING;
-
-    set_lasterrors(&lasterror);
-}
-
-LOQ_bool("registry", "ii", "InfoLevel", (int)InfoLevel, "CurrentState",
-    (ret && lpBuffer != NULL && InfoLevel == SC_STATUS_PROCESS_INFO &&
-        cbBufSize >= sizeof(SERVICE_STATUS_PROCESS)) ?
-        (int)((SERVICE_STATUS_PROCESS *)lpBuffer)->dwCurrentState : 0);
-
-return ret;
-    }
 
         HOOKDEF(BOOL, WINAPI, FindNextFileA, HANDLE hFindFile, LPWIN32_FIND_DATAA lpFindFileData)
         {
@@ -289,205 +259,6 @@ return ret;
 	LOQ_handle("misc", "ss", "FileName", lpFileName != NULL ? lpFileName : "",
 		"FirstEntry",
 		(ret != INVALID_HANDLE_VALUE && lpFindFileData != NULL) ? lpFindFileData->cFileName : "");
-
-	return ret;
-        }
-
-        HOOKDEF(void, WINAPI, GetNativeSystemInfo, LPSYSTEM_INFO lpSystemInfo)
-        {
-            int ret = 0;
-	lasterror_t lasterror;
-
-	Old_GetNativeSystemInfo(lpSystemInfo);
-
-	/* GetNativeSystemInfo is the WOW64/native fallback samples use to read
-	 * the true processor count when GetSystemInfo might be virtualized: it
-	 * fills the same SYSTEM_INFO.dwNumberOfProcessors field, so a sample can
-	 * route its logical-CPU check through this alternate path and treat a
-	 * count below 8 as a stripped-down analysis VM rather than a genuine
-	 * multi-core user desktop, taking its sandbox-detected branch and
-	 * refusing to run. Apply the same forge as the GetSystemInfo hook here:
-	 * overwrite the reported processor count with 8 so the caller's >= 8
-	 * threshold classifies the host as a real user environment even when the
-	 * VM itself cannot be reconfigured to expose 8 vCPUs. */
-	if (!g_config.no_stealth && lpSystemInfo != NULL &&
-			lpSystemInfo->dwNumberOfProcessors < 8) {
-		get_lasterrors(&lasterror);
-
-		lpSystemInfo->dwNumberOfProcessors = 8;
-
-		set_lasterrors(&lasterror);
-	}
-
-	LOQ_void("misc", "i", "NumberOfProcessors",
-		lpSystemInfo != NULL ? lpSystemInfo->dwNumberOfProcessors : 0);
-
-	return;
-        }
-
-        HOOKDEF(BOOL, WINAPI, GetProcessTimes, HANDLE hProcess, LPFILETIME lpCreationTime, LPFILETIME lpExitTime, LPFILETIME lpKernelTime, LPFILETIME lpUserTime)
-        {
-            BOOL ret;
-	lasterror_t lasterror;
-	static LARGE_INTEGER qpc_base;
-	static LARGE_INTEGER qpc_freq;
-	static int base_initialized;
-	LARGE_INTEGER qpc_now;
-	ULONGLONG elapsed_100ns;
-	ULONGLONG cpu_total_100ns;
-	ULONGLONG kernel_100ns;
-	ULONGLONG user_100ns;
-
-	ret = Old_GetProcessTimes(hProcess, lpCreationTime, lpExitTime, lpKernelTime, lpUserTime);
-
-	/* Samples fingerprint scheduler/virtualization overhead with a timing-skew
-	 * test: they read the process kernel+user CPU time via GetProcessTimes,
-	 * spin a ~2-second busy loop, read the times again, and divide the
-	 * ftKernel+ftUser delta by the QueryPerformanceCounter wall-clock delta.
-	 * On bare metal a busy loop pins one core so the CPU/wall ratio sits near
-	 * 1.0, but under a contended or throttled analysis VM the reported CPU
-	 * time lags the wall clock and the ratio drops below a core-count-adjusted
-	 * threshold (~0.28..0.3675, base 0.35), which the sample reads as "running
-	 * virtualized" and uses to take its sandbox-detected branch. Neutralize
-	 * the check by making the reported kernel+user time advance in lockstep
-	 * with real wall-clock time: track a QPC baseline captured on the first
-	 * call and, for the current process, overwrite lpKernelTime/lpUserTime
-	 * with synthetic values whose combined delta is ~0.9x the elapsed
-	 * wall-clock delta (split 1/4 kernel, 3/4 user). Because both readings the
-	 * sample takes are derived from the same baseline, the busy-loop ratio it
-	 * computes is ~0.9 regardless of actual scheduler overhead, staying well
-	 * above the threshold so the timing-skew test concludes "not virtualized". */
-	if (!g_config.no_stealth && ret &&
-			(hProcess == GetCurrentProcess() ||
-			 GetProcessId(hProcess) == GetCurrentProcessId()) &&
-			(lpKernelTime != NULL || lpUserTime != NULL)) {
-		get_lasterrors(&lasterror);
-
-		if (!base_initialized) {
-			if (QueryPerformanceFrequency(&qpc_freq) &&
-					QueryPerformanceCounter(&qpc_base))
-				base_initialized = 1;
-		}
-
-		if (base_initialized && QueryPerformanceCounter(&qpc_now) &&
-				qpc_freq.QuadPart > 0 &&
-				qpc_now.QuadPart > qpc_base.QuadPart) {
-			elapsed_100ns = (ULONGLONG)(qpc_now.QuadPart - qpc_base.QuadPart) *
-				10000000ull / (ULONGLONG)qpc_freq.QuadPart;
-			cpu_total_100ns = elapsed_100ns * 9ull / 10ull;
-			kernel_100ns = cpu_total_100ns / 4ull;
-			user_100ns = cpu_total_100ns - kernel_100ns;
-
-			if (lpKernelTime != NULL) {
-				lpKernelTime->dwLowDateTime = (DWORD)(kernel_100ns & 0xffffffffull);
-				lpKernelTime->dwHighDateTime = (DWORD)(kernel_100ns >> 32);
-			}
-			if (lpUserTime != NULL) {
-				lpUserTime->dwLowDateTime = (DWORD)(user_100ns & 0xffffffffull);
-				lpUserTime->dwHighDateTime = (DWORD)(user_100ns >> 32);
-			}
-		}
-
-		set_lasterrors(&lasterror);
-	}
-
-	LOQ_bool("misc", "ii", "KernelTime",
-		lpKernelTime != NULL ? lpKernelTime->dwLowDateTime : 0,
-		"UserTime",
-		lpUserTime != NULL ? lpUserTime->dwLowDateTime : 0);
-
-	return ret;
-        }
-
-        HOOKDEF(BOOL, WINAPI, QueryPerformanceCounter, LARGE_INTEGER *lpPerformanceCount)
-        {
-            BOOL ret;
-	lasterror_t lasterror;
-	static LARGE_INTEGER qpc_base;
-	static LARGE_INTEGER qpc_freq;
-	static ULONGLONG cpu_base_100ns;
-	static int base_initialized;
-	FILETIME ftCreation, ftExit, ftKernel, ftUser;
-	ULARGE_INTEGER uKernel, uUser;
-	ULONGLONG cpu_now_100ns;
-	ULONGLONG cpu_delta_100ns;
-	ULONGLONG wall_ticks;
-
-	ret = Old_QueryPerformanceCounter(lpPerformanceCount);
-
-	/* Companion / alternative to the GetProcessTimes hook on the CPU-vs-wall
-	 * timing-skew check. Samples fingerprint scheduler/virtualization overhead
-	 * by bracketing a ~2-second busy loop with two GetProcessTimes reads
-	 * (kernel+user CPU time) and two QueryPerformanceCounter reads, then divide
-	 * the CPU-time delta by the QPC wall-clock delta:
-	 * ratio = cpuDeltaSec / wallDeltaSec, where
-	 * wallDeltaSec = (qpcEnd - qpcStart) / QueryPerformanceFrequency. On bare
-	 * metal a busy loop pins one core so the ratio sits near 1.0, but under a
-	 * contended or throttled analysis VM the reported CPU time lags the wall
-	 * clock and the ratio drops below a core-count-adjusted threshold
-	 * (~0.28..0.3675, base 0.35), which the sample reads as "running
-	 * virtualized". The GetProcessTimes hook neutralizes this by inflating the
-	 * reported CPU time to ~0.9x wall; this hook attacks the same ratio from the
-	 * denominator instead — it compresses the reported wall-clock delta so it
-	 * stays proportional to the true CPU time consumed, keeping the ratio ~0.9
-	 * whichever term the sample derives from which API.
-	 *
-	 * On the first call, capture a QPC baseline (the genuine counter value) and
-	 * a CPU-time baseline (raw kernel+user 100ns read via GetProcessTimes). On
-	 * every later call, remap the returned counter to
-	 *   qpc_base + QueryPerformanceFrequency * cpuDeltaSec / 0.9
-	 * i.e. advance it by only cpuDeltaSec/0.9 seconds' worth of ticks
-	 * (denominator shrunk to hold the ratio at ~0.9). Because both bracketing
-	 * reads are derived from the same baselines and the same reported frequency,
-	 * the sample computes wallDeltaSec == cpuDeltaSec/0.9, so
-	 * ratio == cpuDeltaSec / (cpuDeltaSec/0.9) == 0.9 — comfortably above the
-	 * threshold and internally consistent with QueryPerformanceFrequency, so no
-	 * second-order frequency/counter mismatch is exposed. lasterror is
-	 * preserved. */
-	if (!g_config.no_stealth && ret && lpPerformanceCount != NULL) {
-		get_lasterrors(&lasterror);
-
-		if (!base_initialized) {
-			if (QueryPerformanceFrequency(&qpc_freq) && qpc_freq.QuadPart > 0 &&
-					GetProcessTimes(GetCurrentProcess(), &ftCreation,
-						&ftExit, &ftKernel, &ftUser)) {
-				uKernel.LowPart = ftKernel.dwLowDateTime;
-				uKernel.HighPart = ftKernel.dwHighDateTime;
-				uUser.LowPart = ftUser.dwLowDateTime;
-				uUser.HighPart = ftUser.dwHighDateTime;
-				cpu_base_100ns = uKernel.QuadPart + uUser.QuadPart;
-				qpc_base = *lpPerformanceCount;
-				base_initialized = 1;
-			}
-		}
-
-		if (base_initialized && qpc_freq.QuadPart > 0 &&
-				GetProcessTimes(GetCurrentProcess(), &ftCreation, &ftExit,
-					&ftKernel, &ftUser)) {
-			uKernel.LowPart = ftKernel.dwLowDateTime;
-			uKernel.HighPart = ftKernel.dwHighDateTime;
-			uUser.LowPart = ftUser.dwLowDateTime;
-			uUser.HighPart = ftUser.dwHighDateTime;
-			cpu_now_100ns = uKernel.QuadPart + uUser.QuadPart;
-
-			if (cpu_now_100ns > cpu_base_100ns) {
-				cpu_delta_100ns = cpu_now_100ns - cpu_base_100ns;
-				/* wallSec = cpuSec / 0.9; ticks = wallSec * freq =
-				   freq * cpu_delta_100ns * 10 / (9 * 10000000) */
-				wall_ticks = (ULONGLONG)qpc_freq.QuadPart * cpu_delta_100ns *
-					10ull / (9ull * 10000000ull);
-				lpPerformanceCount->QuadPart =
-					qpc_base.QuadPart + (LONGLONG)wall_ticks;
-			} else {
-				lpPerformanceCount->QuadPart = qpc_base.QuadPart;
-			}
-		}
-
-		set_lasterrors(&lasterror);
-	}
-
-	LOQ_bool("misc", "i", "PerformanceCount",
-		lpPerformanceCount != NULL ? (int)lpPerformanceCount->LowPart : 0);
 
 	return ret;
         }
@@ -892,139 +663,54 @@ return ret;
 	return ret;
         }
 
-        HOOKDEF(BOOL, WINAPI, GetTokenInformation, HANDLE TokenHandle, TOKEN_INFORMATION_CLASS TokenInformationClass, LPVOID TokenInformation, DWORD TokenInformationLength, PDWORD ReturnLength)
+        HOOKDEF(void, WINAPI, GetNativeSystemInfo, LPSYSTEM_INFO lpSystemInfo)
         {
-            BOOL ret;
+            /* Logical-processor count reported to the caller. Genuine multi-core user
+	   desktops sit at or above this, whereas the stock CAPE guest is trimmed to
+	   SPOOFED_CPU_CORE_NUM (4) — the exact value the sample's conjunction keys
+	   on. */
+	#define MIRAGE_NATIVE_CPU_COUNT 8
+	int ret = 0;
 	lasterror_t lasterror;
-	int forged;
-	unsigned int handle_hash;
-	TOKEN_MANDATORY_LABEL *label;
-	PUCHAR sub_count;
-	PDWORD last_sub;
 
-	ret = Old_GetTokenInformation(TokenHandle, TokenInformationClass,
-		TokenInformation, TokenInformationLength, ReturnLength);
+	Old_GetNativeSystemInfo(lpSystemInfo);
 
-	/* Samples fingerprint the sandbox by measuring process integrity levels:
-	 * they walk every process from CreateToolhelp32Snapshot, and for each one
-	 * call GetTokenInformation(TokenIntegrityLevel), take the returned
-	 * TOKEN_MANDATORY_LABEL, read the SID's last sub-authority via
-	 * GetSidSubAuthority (the integrity RID), and count a process as
-	 * low-integrity when that RID <= SECURITY_MANDATORY_LOW_RID (0x1000). They
-	 * then compute lowIntegrityProcessCount / successfullyInspectedProcesses
-	 * and treat a ratio below kLowIntegrityUserThreshold (0.05) as an analysis
-	 * VM: a real user desktop runs a meaningful share of processes at low
-	 * integrity (sandboxed browser tabs, AppContainer apps, etc.), whereas a
-	 * bare guest runs almost everything at medium/high integrity, so the ratio
-	 * collapses toward zero and the sample takes its sandbox-detected branch.
-	 * Only the TokenIntegrityLevel class carries this signal, so we act on it
-	 * alone; after the real call succeeds, rewrite the returned label's SID so
-	 * its last sub-authority reads SECURITY_MANDATORY_LOW_RID (0x1000) for a
-	 * deterministic >=5% slice of inspected tokens — those whose token-handle
-	 * hash is a multiple of 20 (1 in every 20 == 5%). Keying off the handle (not
-	 * a call counter) keeps the answer stable if the same token is queried more
-	 * than once, so a sample cannot spot a token flipping integrity between
-	 * reads. That lifts lowIntegrityRatio to/above 0.05 while leaving the
-	 * majority of tokens reporting their genuine integrity, so the sample
-	 * classifies the host as a real user environment. */
-	forged = 0;
-	if (!g_config.no_stealth && ret &&
-			TokenInformationClass == TokenIntegrityLevel &&
-			TokenInformation != NULL &&
-			TokenInformationLength >= sizeof(TOKEN_MANDATORY_LABEL)) {
+	/* GetNativeSystemInfo is the WOW64/native fallback samples use to read the
+	 * true machine configuration when GetSystemInfo might be virtualized: it
+	 * fills the same SYSTEM_INFO, so a sample can route its CPU check through
+	 * this alternate path. The check here is a conjunction — it only fires when
+	 * wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 AND
+	 * dwNumberOfProcessors == 4 — because that exact pair (64-bit host, exactly
+	 * four logical CPUs) is the stock analysis-VM signature: a freshly-imaged
+	 * x64 guest provisioned with the default four vCPUs, which capemon itself
+	 * reports as SPOOFED_CPU_CORE_NUM. A real user's 64-bit desktop rarely lands
+	 * on precisely that combination, so matching it steers the sample into its
+	 * sandbox-detected branch. Break the AND by moving only the second term:
+	 * after the real call, overwrite dwNumberOfProcessors with 8 while leaving
+	 * wProcessorArchitecture reporting AMD64 exactly as the host does. The
+	 * architecture stays truthful (so no 32/64-bit inconsistency is exposed
+	 * against IsWow64Process, PEB or pointer-size observations), the core count
+	 * no longer equals 4, and the conjunction evaluates false — the host reads as
+	 * an ordinary multi-core user machine even when the VM cannot be
+	 * reconfigured to expose 8 vCPUs. Non-AMD64 hosts are left untouched, since
+	 * the sample's check cannot fire there. lasterror is preserved around the
+	 * forged output. */
+	if (!g_config.no_stealth && lpSystemInfo != NULL &&
+			lpSystemInfo->wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 &&
+			lpSystemInfo->dwNumberOfProcessors != MIRAGE_NATIVE_CPU_COUNT) {
 		get_lasterrors(&lasterror);
 
-		handle_hash = (unsigned int)(((ULONG_PTR)TokenHandle) >> 2);
-		if ((handle_hash % 20) == 0) {
-			label = (TOKEN_MANDATORY_LABEL *)TokenInformation;
-			if (label->Label.Sid != NULL && IsValidSid(label->Label.Sid)) {
-				sub_count = GetSidSubAuthorityCount(label->Label.Sid);
-				if (sub_count != NULL && *sub_count > 0) {
-					last_sub = GetSidSubAuthority(label->Label.Sid,
-						(DWORD)(*sub_count - 1));
-					if (last_sub != NULL) {
-						*last_sub = SECURITY_MANDATORY_LOW_RID;
-						forged = 1;
-					}
-				}
-			}
-		}
+		lpSystemInfo->dwNumberOfProcessors = MIRAGE_NATIVE_CPU_COUNT;
 
 		set_lasterrors(&lasterror);
 	}
 
-	LOQ_bool("registry", "iii", "TokenInformationClass", TokenInformationClass,
-		"TokenInformationLength", TokenInformationLength,
-		"ForgedLowIntegrity", forged);
+	LOQ_void("misc", "ii", "ProcessorArchitecture",
+		lpSystemInfo != NULL ? (int)lpSystemInfo->wProcessorArchitecture : 0,
+		"NumberOfProcessors",
+		lpSystemInfo != NULL ? (int)lpSystemInfo->dwNumberOfProcessors : 0);
 
-	return ret;
-        }
-
-        HOOKDEF(BOOL, WINAPI, EnumProcesses, DWORD *lpidProcess, DWORD cb, LPDWORD lpcbNeeded)
-        {
-            /* Reported-process-count target. The sample derives its process
-	       count from *lpcbNeeded / sizeof(DWORD); driving that to 200 clears
-	       kUserProcessThreshold (< 100 => Sandbox, < 140 => still Sandbox) so
-	       the environment is classified User. */
-	static const DWORD MIRAGE_PROC_TARGET = 200;
-	BOOL ret;
-	lasterror_t lasterror;
-	DWORD real_count;
-	DWORD max_slots;
-	DWORD target_count;
-	DWORD synthetic_pid;
-	DWORD i;
-
-	ret = Old_EnumProcesses(lpidProcess, cb, lpcbNeeded);
-
-	/* Samples enumerate every running process ID with EnumProcesses and read
-	 * the total count as *lpcbNeeded / sizeof(DWORD) (bytesReturned / 4 at
-	 * galloro_120_process_count_heuristic_checker.cpp:247), treating a count
-	 * below 140 as a sandbox (fewer than 100 processes => Sandbox; 100..139
-	 * => still treated as Sandbox) and only >= 140 as a genuine, busy user
-	 * desktop. A freshly-imaged analysis VM runs only a lean set of system
-	 * and analysis processes, so the real count falls well short of 140 and
-	 * the sample takes its sandbox-detected branch. After the real call
-	 * succeeds, if the returned count is below 140, pad lpidProcess with
-	 * synthetic plausible PIDs (multiples of 4, the granularity real Windows
-	 * PIDs use) up to MIRAGE_PROC_TARGET (200) entries and set *lpcbNeeded to
-	 * that entry count times sizeof(DWORD) (200 * 4 = 800 bytes), clamped to
-	 * the caller's buffer size cb so we never write past lpidProcess. The
-	 * heuristic then reads processCount=200 >= kUserProcessThreshold and
-	 * classifies the host as a User environment. */
-	if (!g_config.no_stealth && ret && lpidProcess != NULL &&
-			lpcbNeeded != NULL && cb >= sizeof(DWORD)) {
-		real_count = *lpcbNeeded / (DWORD)sizeof(DWORD);
-
-		if (real_count < 140) {
-			get_lasterrors(&lasterror);
-
-			/* never emit more entries than the caller's buffer holds */
-			max_slots = cb / (DWORD)sizeof(DWORD);
-			target_count = MIRAGE_PROC_TARGET;
-			if (target_count > max_slots)
-				target_count = max_slots;
-
-			/* append synthetic PIDs after the genuine ones; step by 4 from a
-			   high base so the forged IDs look like real Windows PIDs and are
-			   unlikely to collide with the enumerated set */
-			synthetic_pid = 10000;
-			for (i = real_count; i < target_count; i++) {
-				lpidProcess[i] = synthetic_pid;
-				synthetic_pid += 4;
-			}
-
-			if (target_count > real_count)
-				*lpcbNeeded = target_count * (DWORD)sizeof(DWORD);
-
-			set_lasterrors(&lasterror);
-		}
-	}
-
-	LOQ_bool("misc", "i", "ProcessCount",
-		lpcbNeeded != NULL ? (*lpcbNeeded / (DWORD)sizeof(DWORD)) : 0);
-
-	return ret;
+	return;
         }
 
         HOOKDEF(BOOL, WINAPI, QueryServiceConfigA, SC_HANDLE hService, LPQUERY_SERVICE_CONFIGA lpServiceConfig, DWORD cbBufSize, LPDWORD pcbBytesNeeded)
@@ -1456,54 +1142,6 @@ return ret;
 	return ret;
         }
 
-        HOOKDEF(BOOL, WINAPI, QueryPerformanceFrequency, LARGE_INTEGER *lpFrequency)
-        {
-            /* Stable, plausible performance-counter frequency (10 MHz). This is the
-	   divisor the sample uses to convert QueryPerformanceCounter deltas into
-	   microseconds; forcing a fixed, round value keeps that conversion coherent
-	   with the forged QPC deltas produced by the companion QueryPerformanceCounter
-	   hook. 10 MHz is a common QPC rate on real hardware, so the reported
-	   frequency stays unremarkable. */
-	#define MIRAGE_QPF_FORCED_FREQ 10000000ll
-	BOOL ret;
-	lasterror_t lasterror;
-
-	ret = Old_QueryPerformanceFrequency(lpFrequency);
-
-	/* Samples time an inter-thread ping-pong (or similar tight latency probe) by
-	 * bracketing each round-trip with two QueryPerformanceCounter reads, then
-	 * convert the (end - start) tick delta into microseconds by dividing by the
-	 * counter frequency this API returns: latency_us = delta_ticks * 1e6 / freq.
-	 * They aggregate the per-iteration microsecond latencies into a mean and
-	 * standard deviation and flag the host as an instrumented/contended analysis
-	 * VM when those statistics exceed their floors (e.g. mean > 200us AND
-	 * stddev > 300us). The companion QueryPerformanceCounter hook already forges
-	 * each bracketed delta to a tiny, fixed ~50us-worth of ticks, but that step is
-	 * derived as freq * 50 / 1e6, so the microsecond value the sample recovers is
-	 * only coherent if the frequency it divides by here matches the frequency the
-	 * counter hook used. Report a stable 10 MHz (10,000,000 Hz) frequency so the
-	 * divisor is fixed and consistent with those forged deltas: the recovered
-	 * per-iteration latency stays a constant ~50us (well under the 200us mean
-	 * floor) with effectively zero variance (well under the 300us stddev floor),
-	 * so both conditions are false and the environment classifies as a genuine
-	 * low-latency host. A stable frequency also avoids exposing a second-order
-	 * rate/counter mismatch between the two APIs. lasterror is preserved around
-	 * the forged response. */
-	if (!g_config.no_stealth && lpFrequency != NULL) {
-		get_lasterrors(&lasterror);
-
-		lpFrequency->QuadPart = MIRAGE_QPF_FORCED_FREQ;
-		ret = TRUE;
-
-		set_lasterrors(&lasterror);
-	}
-
-	LOQ_bool("misc", "i", "Frequency",
-		lpFrequency != NULL ? (int)lpFrequency->LowPart : 0);
-
-	return ret;
-        }
-
         HOOKDEF(BOOL, WINAPI, SleepConditionVariableCS, PCONDITION_VARIABLE ConditionVariable, PCRITICAL_SECTION CriticalSection, DWORD dwMilliseconds)
         {
             BOOL ret;
@@ -1698,6 +1336,104 @@ return ret;
 		"Milliseconds", dwMilliseconds,
 		"NumberOfBytesTransferred",
 		lpNumberOfBytesTransferred != NULL ? *lpNumberOfBytesTransferred : 0);
+
+	return ret;
+        }
+
+        HOOKDEF(BOOL, WINAPI, QueryPerformanceCounter, LARGE_INTEGER *lpPerformanceCount)
+        {
+            /* Forged counter frequency (10 MHz). MUST match the value the companion
+	   QueryPerformanceFrequency hook pins (MIRAGE_QPF_FORCED_FREQ): the sample
+	   recovers elapsed time as (counterAfter - counterBefore) / frequency, so the
+	   synthetic ticks we emit here are only coherent if expressed in the same
+	   10 MHz timebase the sample divides by. A 10 MHz counter ticks once every
+	   100 ns, which is exactly the unit capemon's time_skipped accumulator uses,
+	   so the accrued skipped-sleep time folds into this timebase 1:1. */
+	#define MIRAGE_QPC_FORCED_FREQ 10000000ll
+	BOOL ret;
+	lasterror_t lasterror;
+	static LARGE_INTEGER real_freq;
+	static int freq_initialized;
+	static LONGLONG base_real;
+	static int base_initialized;
+	LONGLONG real_now;
+	LONGLONG real_delta;
+	LONGLONG virt_qpc;
+
+	ret = Old_QueryPerformanceCounter(lpPerformanceCount);
+
+	/* Samples bracket a long blocking sleep with two QueryPerformanceCounter
+	 * reads to catch a sandbox that shortcuts sleeps to accelerate analysis:
+	 * they read counterBefore, call Sleep(300000) (kRequestedSleepMs), read
+	 * counterAfter, then compute
+	 *   measuredElapsedMs = (counterAfter - counterBefore) / frequency * 1000
+	 *   elapsedRatio      = measuredElapsedMs / kRequestedSleepMs
+	 * and flag the host when elapsedRatio < 0.95. capemon skips such blocking
+	 * sleeps and returns from Sleep()/NtDelayExecution early, so the raw counter
+	 * advances by only the handful of real milliseconds that actually elapsed and
+	 * the measured delta collapses to a tiny fraction of the requested 300000 ms,
+	 * driving elapsedRatio far below 0.95 and revealing the accelerated
+	 * environment.
+	 *
+	 * The transparent answer is to maintain a virtual performance counter that
+	 * advances by the amount of Sleep/NtDelayExecution time the sandbox skipped,
+	 * so each returned reading is consistent with the full requested sleep
+	 * duration. capemon accumulates every 100 ns it shortcuts from a
+	 * blocking/sleeping call into the shared time_skipped counter (extern
+	 * LARGE_INTEGER, in 100 ns units). On the first call seed a base from the
+	 * genuine QPC value; on every call report
+	 *   virt_qpc = (real_now - base_real) rescaled into the forged 10 MHz
+	 *              timebase   +   time_skipped (100 ns == one 10 MHz tick, 1:1).
+	 * Because a 10 MHz tick is exactly 100 ns, the accrued skip converts straight
+	 * into forged ticks, so counterAfter.QuadPart ends up ~=
+	 * counterBefore.QuadPart + frequency * kRequestedSleepMs / 1000 across the
+	 * skipped sleep and elapsedRatio settles at ~1.0 (>= 0.95). Folding the skew
+	 * into every read equally means intervals that contained no skipped sleep are
+	 * undistorted, and expressing the counter in the same 10 MHz units the
+	 * QueryPerformanceFrequency hook reports keeps the microsecond conversion
+	 * coherent. Working from a base delta (rather than scaling the raw counter)
+	 * keeps the 10 MHz rescale clear of 64-bit overflow. lasterror is preserved
+	 * around the forged response. */
+	if (!g_config.no_stealth && ret && lpPerformanceCount != NULL) {
+		get_lasterrors(&lasterror);
+
+		if (!freq_initialized) {
+			if (!QueryPerformanceFrequency(&real_freq))
+				real_freq.QuadPart = 0;
+			freq_initialized = 1;
+		}
+
+		real_now = lpPerformanceCount->QuadPart;
+
+		if (!base_initialized) {
+			base_real = real_now;
+			base_initialized = 1;
+		}
+
+		real_delta = real_now - base_real;
+		if (real_delta < 0)
+			real_delta = 0;
+
+		/* genuine time elapsed since the first call, expressed in the forged
+		   10 MHz timebase the sample divides by */
+		if (real_freq.QuadPart > 0)
+			virt_qpc = real_delta * MIRAGE_QPC_FORCED_FREQ / real_freq.QuadPart;
+		else
+			virt_qpc = real_delta;
+
+		/* fold in the sleep/NtDelayExecution time capemon skipped: time_skipped
+		   is in 100 ns units and a 10 MHz tick is exactly 100 ns, so the accrued
+		   skip converts 1:1 into forged ticks and the post-sleep read reflects
+		   the full requested duration */
+		virt_qpc += (LONGLONG)time_skipped.QuadPart;
+
+		lpPerformanceCount->QuadPart = virt_qpc;
+
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_bool("misc", "i", "PerformanceCount",
+		lpPerformanceCount != NULL ? (int)lpPerformanceCount->LowPart : 0);
 
 	return ret;
         }

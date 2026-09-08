@@ -84,7 +84,7 @@ HOOKDEF(HHOOK, WINAPI, SetWindowsHookExW,
 	HHOOK ret;
 	lasterror_t lasterror;
 
-	ret = Old_SetWindowsHookExW(idHook, lpfn, hMod, dwThreadId);
+	ret = Old_SetWindowsHookExW(idHook, lpfn, hmod, dwThreadId);
 
 	/* Samples install a WH_MOUSE_LL low-level mouse hook whose MouseProc watches
 	 * for a scroll message (wParam == WM_MOUSEWHEEL / WM_VSCROLL / WM_HSCROLL)
@@ -117,7 +117,7 @@ HOOKDEF(HHOOK, WINAPI, SetWindowsHookExW,
 	}
 
 	LOQ_nonnull("system", "ippi", "HookIdentifier", idHook, "ProcedureAddress", lpfn,
-		"ModuleAddress", hMod, "ThreadId", dwThreadId);
+		"ModuleAddress", hmod, "ThreadId", dwThreadId);
 	return ret;
 }
 
@@ -656,60 +656,146 @@ HOOKDEF(BOOL, WINAPI, GetCursorPos,
 	_Out_ LPPOINT lpPoint
 )
 {
-/* Monotonic call counter driving the synthetic cursor motion. Each read
-	   advances the reported position by a small pseudo-random delta so no two
-	   successive reads coincide and, crucially, every read differs from the very
-	   first one. Function-static so successive calls share the running offset,
-	   matching the other generated user-activity hooks' lock-free style. */
-	static unsigned int mirage_cursor_tick;
+/* Eight-direction unit-step table (cardinals + diagonals). Adjacent indices
+	   are 45 degrees apart, comfortably past the sample's 20-degree
+	   direction-change threshold, so rotating the heading by any non-zero index
+	   delta registers as a genuine direction change. */
+	static const int mirage_step_x[8] = {  1,  1,  0, -1, -1, -1,  0,  1 };
+	static const int mirage_step_y[8] = {  0,  1,  1,  1,  0, -1, -1, -1 };
+	/* On-screen bounding box the forged pointer reflects inside, so the path
+	   never leaves a plausible desktop and never teleports (a teleport would
+	   read as an unnaturally large jump). */
+	static const LONG box_left = 60;
+	static const LONG box_top = 60;
+	static const LONG box_right = 1860;
+	static const LONG box_bottom = 1020;
+	/* Continuous per-sample trajectory state. Function-static so successive 40ms
+	   reads share one running path, matching the other generated user-activity
+	   hooks' lock-free style. */
+	static int mirage_cursor_init;
+	static LONG mirage_cursor_x;
+	static LONG mirage_cursor_y;
+	static int mirage_cursor_dir;
+	static unsigned int mirage_cursor_seq;
+	static unsigned int mirage_cursor_rng;
 	BOOL ret;
 	lasterror_t lasterror;
+	unsigned int r;
+	int step;
+	LONG mag;
 	LONG dx;
 	LONG dy;
-	int x = 0;
-	int y = 0;
 
 	ret = Old_GetCursorPos(lpPoint);
 
-	/* Samples probe for a live human by sampling GetCursorPos across a polling
-	 * loop (e.g. 30 reads spaced 1000 ms apart): they record the first sample as
-	 * initialPos and compare every later currentPos against it, setting
-	 * mouseMoved only when the x or y coordinate differs. If the cursor never
-	 * moves (currentPos == initialPos for the whole window) they conclude nobody
-	 * is at the mouse and classify the host as an idle, headless analysis VM,
-	 * taking their sandbox-detected branch. On a freshly-imaged sandbox with no
-	 * interactive user the pointer sits frozen, so the x/y inequality never
-	 * becomes true and mouseMoved stays false. The transparent answer is to forge
-	 * a cursor that is always in motion: advance a per-read pseudo-random delta
-	 * (+7 in x, +3 in y, seeded from the monotonic counter) and wrap it inside a
-	 * plausible on-screen box so the reported coordinates keep changing on every
-	 * call without drifting off-screen. Because the offset grows with each read,
-	 * every currentPos differs from initialPos, so the x/y inequality becomes
-	 * true, mouseMoved is set, and the sample takes its user-environment
-	 * (task-routine) branch. lasterror is preserved around the forged response. */
+	/* Samples sample GetCursorPos on a fixed cadence (e.g. every 40 ms across a
+	 * 60 s window) to reconstruct the cursor path, then derive three naturalness
+	 * ratios over the movement segments between consecutive samples: the
+	 * micro-move ratio (segments of a few pixels), the direction-change ratio
+	 * (segments that turn more than ~20 degrees from the previous heading), and
+	 * the large-jump ratio (segments longer than a large pixel threshold). They
+	 * classify the host as an idle, headless analysis VM when
+	 * (microMoveSegments + directionChangeSegments) / movementSegments < 0.25, OR
+	 * largeJumpSegments / movementSegments > 0.60, OR movementSegments < 10 — the
+	 * shape of a frozen pointer, or of a crude spoof that teleports the cursor in
+	 * big uniform hops. A freshly-imaged sandbox with no interactive user leaves
+	 * the pointer stationary, so movementSegments never accrues and the check
+	 * fires. The transparent answer is NOT a rigid ramp but a synthesized
+	 * human-like micro-movement path: on every read advance the reported position
+	 * by a small 1-6 px jitter along a heading that turns (by 45+ degrees) on
+	 * essentially every step, with only an occasional larger jump held strictly
+	 * under 80 px (~1 in 12 reads). This keeps the micro-move and direction-change
+	 * ratios high (their sum well above 0.25), the large-jump ratio low (well
+	 * below 0.60), and — because every step moves at least 1 px — drives
+	 * movementSegments past 10 within the first handful of samples, so all three
+	 * conditions evaluate as a genuine attended user session regardless of the
+	 * classifier's exact thresholds. The reflecting box keeps the path on-screen
+	 * without ever teleporting. lasterror is preserved around the forged
+	 * response. */
 	if (!g_config.no_stealth && lpPoint != NULL) {
 		get_lasterrors(&lasterror);
 
-		/* +7 / +3 per read, wrapped inside a 1000x600 box anchored at (100,100)
-		   so successive samples always differ yet stay on a plausible desktop */
-		dx = (LONG)((mirage_cursor_tick * 7) % 1000);
-		dy = (LONG)((mirage_cursor_tick * 3) % 600);
-		lpPoint->x = 100 + dx;
-		lpPoint->y = 100 + dy;
+		if (!mirage_cursor_init) {
+			/* seed the PRNG (non-zero) and anchor the path at the genuine
+			   pointer when available, else at the box centre */
+			mirage_cursor_rng = 0x1a2b3c4du;
+			if (ret) {
+				mirage_cursor_x = lpPoint->x;
+				mirage_cursor_y = lpPoint->y;
+			} else {
+				mirage_cursor_x = (box_left + box_right) / 2;
+				mirage_cursor_y = (box_top + box_bottom) / 2;
+			}
+			if (mirage_cursor_x < box_left || mirage_cursor_x > box_right)
+				mirage_cursor_x = (box_left + box_right) / 2;
+			if (mirage_cursor_y < box_top || mirage_cursor_y > box_bottom)
+				mirage_cursor_y = (box_top + box_bottom) / 2;
+			mirage_cursor_dir = 0;
+			mirage_cursor_init = 1;
+		}
 
-		mirage_cursor_tick++;
+		/* advance an xorshift PRNG so the jitter looks organic rather than
+		   periodic */
+		r = mirage_cursor_rng;
+		r ^= r << 13;
+		r ^= r >> 17;
+		r ^= r << 5;
+		mirage_cursor_rng = r;
+
+		/* turn the heading by a non-zero amount on (almost) every step so the
+		   direction-change ratio stays high; +/- so the path meanders */
+		step = (int)(r % 4) + 1;         /* 1..4 quadrant-steps (>= 45 degrees) */
+		if (r & 0x40u)
+			mirage_cursor_dir = (mirage_cursor_dir + step) & 7;
+		else
+			mirage_cursor_dir = (mirage_cursor_dir - step) & 7;
+
+		/* magnitude: mostly 1-4 px micro-moves (euclidean <= ~6 px even on the
+		   diagonals), with an occasional larger hop of 25-49 base px (diagonal
+		   length up to ~69 px, always < 80 px) roughly 1 in 12 reads */
+		if (((r >> 8) % 12u) == 0u)
+			mag = 25 + (LONG)((r >> 12) % 25u);
+		else
+			mag = 1 + (LONG)((r >> 12) % 4u);
+
+		dx = (LONG)mirage_step_x[mirage_cursor_dir] * mag;
+		dy = (LONG)mirage_step_y[mirage_cursor_dir] * mag;
+
+		mirage_cursor_x += dx;
+		mirage_cursor_y += dy;
+
+		/* reflect off the box edges so the pointer stays on a plausible desktop
+		   without a teleport */
+		if (mirage_cursor_x < box_left)
+			mirage_cursor_x = box_left + (box_left - mirage_cursor_x);
+		if (mirage_cursor_x > box_right)
+			mirage_cursor_x = box_right - (mirage_cursor_x - box_right);
+		if (mirage_cursor_y < box_top)
+			mirage_cursor_y = box_top + (box_top - mirage_cursor_y);
+		if (mirage_cursor_y > box_bottom)
+			mirage_cursor_y = box_bottom - (mirage_cursor_y - box_bottom);
+
+		/* clamp in case a reflection overshoots the far edge */
+		if (mirage_cursor_x < box_left)
+			mirage_cursor_x = box_left;
+		if (mirage_cursor_x > box_right)
+			mirage_cursor_x = box_right;
+		if (mirage_cursor_y < box_top)
+			mirage_cursor_y = box_top;
+		if (mirage_cursor_y > box_bottom)
+			mirage_cursor_y = box_bottom;
+
+		lpPoint->x = mirage_cursor_x;
+		lpPoint->y = mirage_cursor_y;
+		mirage_cursor_seq++;
 
 		ret = TRUE;
 
 		set_lasterrors(&lasterror);
 	}
 
-	if (lpPoint != NULL) {
-		x = (int)lpPoint->x;
-		y = (int)lpPoint->y;
-	}
-
-	LOQ_bool("system", "pii", "lpPoint", lpPoint, "x", x, "y", y);
+	LOQ_bool("window", "ii", "x", lpPoint != NULL ? lpPoint->x : 0,
+		"y", lpPoint != NULL ? lpPoint->y : 0);
 
 	return ret;
 }
@@ -1321,10 +1407,14 @@ HOOKDEF(BOOL, WINAPI, GlobalMemoryStatusEx,
 )
 {
 /* Total physical RAM the sample must see to classify the host as a real
-	 * user machine (32 GB); its heuristic reads MEMORYSTATUSEX.ullTotalPhys,
-	 * divides to memorySizeGB, and treats <= 15 GB as a stripped-down analysis
-	 * VM. */
-	static const DWORDLONG MIRAGE_FORCED_TOTAL_PHYS = 34359738368ull; /* 32 GB */
+	 * user machine (16 GiB). The sample's heuristic reads
+	 * MEMORYSTATUSEX.ullTotalPhys and flags a sandbox when either
+	 *   Rule A: physical memory < 8 GiB, OR
+	 *   Rule B: physical memory <= 15 GiB AND within +/-5% of a 1 GiB or 2 GiB
+	 *           provisioning size.
+	 * Forcing 16 GiB makes both rules evaluate false (16 > 8 and 16 > 15), so
+	 * isUserEnv becomes true. */
+	static const DWORDLONG MIRAGE_FORCED_TOTAL_PHYS = 17179869184ull; /* 16 GiB */
 	BOOL ret;
 	lasterror_t lasterror;
 	DWORDLONG old_total;
@@ -1332,17 +1422,20 @@ HOOKDEF(BOOL, WINAPI, GlobalMemoryStatusEx,
 	ret = Old_GlobalMemoryStatusEx(lpBuffer);
 
 	/* Samples call GlobalMemoryStatusEx and read MEMORYSTATUSEX.ullTotalPhys
-	 * (total physical RAM in bytes), convert it to gigabytes, and treat a value
-	 * at or below 15 GB as a freshly-imaged, memory-starved analysis VM rather
-	 * than a genuine user desktop, taking their sandbox-detected branch. A
-	 * lean guest is typically provisioned with only a couple of GB, so the real
-	 * report falls well short of the threshold. When the reported total is below
-	 * the forced 32 GB value, overwrite ullTotalPhys with 34359738368 bytes so
-	 * the sample's memorySizeGB > 15 check passes, and scale ullAvailPhys by the
-	 * same factor so the reported available/total ratio stays self-consistent;
+	 * (total physical RAM in bytes) to detect a memory-starved analysis VM: a
+	 * value < 8 GiB (Rule A), or <= 15 GiB when the size sits within +/-5% of a
+	 * typical 1 GiB or 2 GiB VM provisioning (Rule B), is treated as a sandbox
+	 * rather than a genuine user desktop, so the sample takes its evasive
+	 * branch. A lean guest is provisioned with only a couple of GiB, so the real
+	 * report trips one of those rules. When the reported total is below the
+	 * forced 16 GiB value, overwrite ullTotalPhys with 17179869184 bytes — above
+	 * both the 8 GiB floor and the 15 GiB ceiling, so neither rule fires — and
+	 * scale ullAvailPhys / ullTotalPageFile / ullAvailPageFile by the same factor
+	 * so the reported available/total and page-file ratios stay self-consistent;
 	 * when there is no usable baseline total, present a plausible ~50%-available
-	 * buffer. lasterror is preserved around the forged response so the sample
-	 * classifies the host as a real user environment and runs its task-routine. */
+	 * buffer and a page file sized at ~1.5x physical RAM. lasterror is preserved
+	 * around the forged response so the sample classifies the host as a real user
+	 * environment and runs its task-routine. */
 	if (!g_config.no_stealth && ret && lpBuffer != NULL &&
 			lpBuffer->ullTotalPhys < MIRAGE_FORCED_TOTAL_PHYS) {
 		get_lasterrors(&lasterror);
@@ -1350,13 +1443,22 @@ HOOKDEF(BOOL, WINAPI, GlobalMemoryStatusEx,
 		old_total = lpBuffer->ullTotalPhys;
 
 		if (old_total > 0) {
-			/* preserve the real available/total fraction (in permille) while
-			   growing the total, dividing first to avoid 64-bit overflow */
-			DWORDLONG permille = lpBuffer->ullAvailPhys * 1000ull / old_total;
-			lpBuffer->ullAvailPhys = MIRAGE_FORCED_TOTAL_PHYS / 1000ull * permille;
+			/* preserve the real available/total and page-file fractions (in
+			   permille) while growing the total, dividing first to avoid 64-bit
+			   overflow */
+			DWORDLONG avail_permille = lpBuffer->ullAvailPhys * 1000ull / old_total;
+			DWORDLONG totpage_permille = lpBuffer->ullTotalPageFile * 1000ull / old_total;
+			DWORDLONG availpage_permille = lpBuffer->ullAvailPageFile * 1000ull / old_total;
+
+			lpBuffer->ullAvailPhys = MIRAGE_FORCED_TOTAL_PHYS / 1000ull * avail_permille;
+			lpBuffer->ullTotalPageFile = MIRAGE_FORCED_TOTAL_PHYS / 1000ull * totpage_permille;
+			lpBuffer->ullAvailPageFile = MIRAGE_FORCED_TOTAL_PHYS / 1000ull * availpage_permille;
 		} else {
-			/* no usable baseline: report a plausible ~50%-available buffer */
+			/* no usable baseline: report a plausible ~50%-available buffer and a
+			   page file sized at ~1.5x physical RAM */
 			lpBuffer->ullAvailPhys = MIRAGE_FORCED_TOTAL_PHYS / 2ull;
+			lpBuffer->ullTotalPageFile = MIRAGE_FORCED_TOTAL_PHYS * 3ull / 2ull;
+			lpBuffer->ullAvailPageFile = MIRAGE_FORCED_TOTAL_PHYS * 3ull / 4ull;
 		}
 
 		lpBuffer->ullTotalPhys = MIRAGE_FORCED_TOTAL_PHYS;
@@ -1364,7 +1466,8 @@ HOOKDEF(BOOL, WINAPI, GlobalMemoryStatusEx,
 		set_lasterrors(&lasterror);
 	}
 
-	LOQ_void("misc", "ii", "MemoryLoad", lpBuffer->dwMemoryLoad, "TotalPhysicalMB", lpBuffer->ullTotalPhys / (1024 * 1024));
+	LOQ_bool("misc", "ii", "MemoryLoad", lpBuffer != NULL ? lpBuffer->dwMemoryLoad : 0,
+		"TotalPhysicalMB", lpBuffer != NULL ? (int)(lpBuffer->ullTotalPhys / (1024 * 1024)) : 0);
 	return ret;
 }
 

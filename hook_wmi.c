@@ -132,7 +132,7 @@ HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	   IWbemClassObject::Next (property enumeration — lFlags, strName, pVal,
 	   pType, plFlavor), but the generated countermeasure was written against
 	   IEnumWbemClassObject::Next (object enumeration — lTimeout, uCount,
-	   ppOutParams, puReturned), a different interface whose parameters do not
+	   apObjects, puReturned), a different interface whose parameters do not
 	   exist in this signature. Applying that object-enumeration logic here would
 	   misinterpret the arguments at runtime, so no transparency logic is applied:
 	   call the original with the real property-enumeration arguments and return

@@ -935,35 +935,20 @@ HOOKDEF(NTSTATUS, WINAPI, NtQueryDirectoryFile,
 	__in	  BOOLEAN ReturnSingleEntry,
 	__in_opt  PUNICODE_STRING FileName,
 	__in	  BOOLEAN RestartScan
-) {
-	OBJECT_ATTRIBUTES objattr;
-	NTSTATUS ret;
-	ULONG_PTR length;
+)
+{
+NTSTATUS ret;
 
-	memset(&objattr, 0, sizeof(objattr));
-	objattr.ObjectName = FileName;
-	objattr.RootDirectory = FileHandle;
+	ret = Old_NtQueryDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext,
+		IoStatusBlock, FileInformation, Length, FileInformationClass,
+		ReturnSingleEntry, FileName, RestartScan);
 
-	ret = Old_NtQueryDirectoryFile(FileHandle, Event,
-		ApcRoutine, ApcContext, IoStatusBlock, FileInformation,
-		Length, FileInformationClass, ReturnSingleEntry,
-		FileName, RestartScan);
+	LOQ_ntstatus("system", "piiii", "FileHandle", FileHandle,
+		"Length", (int)Length,
+		"FileInformationClass", (int)FileInformationClass,
+		"ReturnSingleEntry", (int)ReturnSingleEntry,
+		"RestartScan", (int)RestartScan);
 
-	if (NT_SUCCESS(ret))
-		length = IoStatusBlock->Information;
-	else
-		length = 0;
-
-	/* don't log the resulting buffer, otherwise we can't turn these calls into simple duplicates */
-	if (FileInformationClass == FileNamesInformation) {
-		LOQ_ntstatus("filesystem", "pOi", "FileHandle", FileHandle,
-			"FileName", &objattr, "FileInformationClass", FileInformationClass);
-	}
-	else {
-		LOQ_ntstatus("filesystem", "pbOi", "FileHandle", FileHandle,
-			"FileInformation", length, FileInformation,
-			"FileName", &objattr, "FileInformationClass", FileInformationClass);
-	}
 	return ret;
 }
 

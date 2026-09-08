@@ -1142,40 +1142,45 @@ HOOKDEF(ULONG, WINAPI, GetAdaptersAddresses,
 	_Inout_ PULONG				SizePointer
 )
 {
-/* Real-hardware Intel OUI (00:1B:21) stamped over the leading three bytes
-	   of every enumerated adapter's PhysicalAddress. GetAdaptersAddresses is the
-	   modern replacement for GetAdaptersInfo, and samples use it identically:
-	   they read IP_ADAPTER_ADDRESSES.PhysicalAddress and compare the first three
-	   bytes (the OUI) against a blacklist of known virtualization-vendor OUIs —
+/* Real-hardware Intel MAC (00:1B:21:11:22:33) stamped over every enumerated
+	   adapter's PhysicalAddress. GetAdaptersAddresses is the modern replacement
+	   for GetAdaptersInfo, and samples use it identically: they read
+	   IP_ADAPTER_ADDRESSES.PhysicalAddress and compare the leading three bytes
+	   (the OUI) against a blacklist of known virtualization-vendor OUIs —
 	   00:05:69 / 00:50:56 (VMware), 08:00:27 (VirtualBox), 00:1C:42 (Parallels),
-	   00:16:3E (Xen) — treating any match as proof the NIC is virtual and the
-	   host a sandbox. A freshly-imaged guest's synthetic NIC carries one of those
-	   OUIs, so the lookup hits and the sample takes its sandbox-detected branch. */
-	static const BYTE mirage_intel_oui[3] = { 0x00, 0x1B, 0x21 };
+	   00:16:3E (Xen), 00:15:5D (Hyper-V), 52:54:00 (QEMU/KVM) — treating any
+	   match as proof the NIC is virtual and the host a sandbox. A freshly-imaged
+	   guest's synthetic NIC carries one of those OUIs, so the lookup hits and the
+	   sample takes its sandbox-detected branch. 00:1B:21 is a genuine Intel OUI,
+	   so the full forged MAC clears every OUI blacklist entry. */
+	static const BYTE mirage_intel_mac[6] = { 0x00, 0x1B, 0x21, 0x11, 0x22, 0x33 };
 	ULONG ret;
 	lasterror_t lasterror;
 	PIP_ADAPTER_ADDRESSES adapter;
 	unsigned int forged;
+	unsigned int i;
 
 	ret = Old_GetAdaptersAddresses(Family, Flags, Reserved, AdapterAddresses, SizePointer);
 
 	/* After the real call succeeds, walk the returned IP_ADAPTER_ADDRESSES linked
-	 * list and overwrite each adapter's PhysicalAddress[0..2] with the
-	 * real-hardware Intel OUI 00:1B:21, keeping PhysicalAddressLength and the low
-	 * bytes of the MAC untouched. The sample's blacklist lookup on the OUI then
-	 * never matches a virtualization vendor, so every NIC reads as genuine
-	 * physical hardware and the host is classified as a real user environment.
-	 * This spoofs the modern adapter-enumeration path identically to the
-	 * GetAdaptersInfo hook. lasterror is preserved around the forged response. */
+	 * list and overwrite each Ethernet-class adapter's PhysicalAddress with the
+	 * real-hardware Intel MAC 00:1B:21:11:22:33 (PhysicalAddressLength left at 6).
+	 * The sample's OUI blacklist lookup then never matches a virtualization
+	 * vendor, so every NIC reads as genuine physical hardware and the host is
+	 * classified as a real user environment. This covers the common non-WMI
+	 * MAC-OUI code path, spoofing the modern adapter-enumeration path identically
+	 * to the GetAdaptersInfo hook, so a sample (or a sibling check) that queries
+	 * adapters via iphlpapi instead of WMI is neutralized the same way. Adapters
+	 * with a shorter/zero physical address (loopback, tunnels) are left untouched.
+	 * lasterror is preserved around the forged response. */
 	forged = 0;
 	if (!g_config.no_stealth && ret == ERROR_SUCCESS && AdapterAddresses != NULL) {
 		get_lasterrors(&lasterror);
 
 		for (adapter = (PIP_ADAPTER_ADDRESSES)AdapterAddresses; adapter != NULL; adapter = adapter->Next) {
-			if (adapter->PhysicalAddressLength >= 3) {
-				adapter->PhysicalAddress[0] = mirage_intel_oui[0];
-				adapter->PhysicalAddress[1] = mirage_intel_oui[1];
-				adapter->PhysicalAddress[2] = mirage_intel_oui[2];
+			if (adapter->PhysicalAddressLength >= sizeof(mirage_intel_mac)) {
+				for (i = 0; i < sizeof(mirage_intel_mac); i++)
+					adapter->PhysicalAddress[i] = mirage_intel_mac[i];
 				forged++;
 			}
 		}
