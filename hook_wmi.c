@@ -197,108 +197,6 @@ HRESULT ret;
 
 /* shared dispatch helper(s) called above — extend these, not the wrapper */
 
-void SpoofWmiData(const wchar_t* szClassName, const wchar_t* wszName, VARIANT* pVal) {
-	if (g_config.no_stealth)
-		return;
-
-	if (!szClassName || !wszName || !pVal)
-		return;
-
-	//
-	// Spoofery logic for BSTR (wchar_t *)
-	//
-	if (pVal->vt == VT_BSTR && pVal->bstrVal) {
-		if (!_wcsicmp(pVal->bstrVal, L"Microsoft Basic Display Adapter")) {
-			SysFreeString(pVal->bstrVal);
-			pVal->bstrVal = SysAllocString(SPOOFED_GPU_NAME);
-		}
-		else if (!_wcsicmp(wszName, L"TotalPhysicalMemory")) {
-			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
-			if (actualMemory < SPOOFED_RAM) {
-				SysFreeString(pVal->bstrVal);
-				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
-			}
-		}
-		else if (!_wcsicmp(wszName, L"TotalVisibleMemorySize")) {
-			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
-			// actualMemory is in Kilobytes, our spoofed values are in bytes
-			if (actualMemory < (SPOOFED_RAM / 1024)) {
-				SysFreeString(pVal->bstrVal);
-				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM_IN_KB);
-			}
-		}
-		//
-		// Logic for BSTR fakery specific to an exact szClassName
-		//
-		else if (!_wcsicmp(szClassName, L"Win32_LogicalDisk") && !_wcsicmp(wszName, L"Size")) {
-			unsigned long long lSize = wcstoull(pVal->bstrVal, NULL, 10);
-			if (lSize < SPOOFED_DISK_SIZE - RECOVERY_PARTITION_SIZE) {
-				SysFreeString(pVal->bstrVal);
-				pVal->bstrVal = SysAllocString(WIDE_DISK_LOGICAL_SIZE);
-			}
-		}
-		else if (!_wcsicmp(szClassName, L"Win32_PhysicalMemory") && !_wcsicmp(wszName, L"Capacity")) {
-			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
-			if (actualMemory < SPOOFED_RAM) {
-				SysFreeString(pVal->bstrVal);
-				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
-			}
-		}
-		//
-		// Samples read Win32_BIOS.SerialNumber and flag the VM when it
-		// matches biosSerialNumber LIKE '%VMWare%'/'%Xen%'/'%Virtual%'/
-		// '%A M I%' OR == '0'. Replace it with a plausible OEM service-tag
-		// style serial that hits none of those signatures.
-		//
-		else if (!_wcsicmp(szClassName, L"Win32_BIOS") && !_wcsicmp(wszName, L"SerialNumber")) {
-			SysFreeString(pVal->bstrVal);
-			pVal->bstrVal = SysAllocString(L"7XKQZ13");
-		}
-	}
-	//
-	// Spoofery logic for I4 (Signed 32-bit integer)
-	//
-	else if (pVal->vt == VT_I4) {
-		if (!_wcsicmp(szClassName, L"Win32_Processor") && !_wcsicmp(wszName, L"ThreadCount")) {
-			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
-				pVal->lVal = SPOOFED_CPU_CORE_NUM;
-		}
-		else if (!_wcsicmp(wszName, L"NumberOfCores")) {
-			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
-				pVal->lVal = SPOOFED_CPU_CORE_NUM;
-		}
-		else if (!_wcsicmp(wszName, L"NumberOfLogicalProcessors")) {
-			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
-				pVal->lVal = SPOOFED_CPU_CORE_NUM;
-		}
-		else if (!_wcsicmp(wszName, L"NumberOfEnabledCore")) {
-			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
-				pVal->lVal = SPOOFED_CPU_CORE_NUM;
-		}
-		else if (!_wcsicmp(wszName, L"AdapterRAM")) {
-			if (SPOOFED_GPU_RAM > 0x7FFFFFFFULL) {
-				// Mimic overflowing the I4 if you have >2GB of Spoofed GPU RAM
-				pVal->lVal = 0x7FFFFFFF;
-			}
-			else {
-				// Cast to LONG to avoid compiler warning if SPOOFED_GPU_RAM is >2GB
-				if (pVal->lVal < (LONG)SPOOFED_GPU_RAM) {
-					pVal->lVal = (LONG)SPOOFED_GPU_RAM;
-				}
-			}
-		}
-	}
-	//
-	// Spoofery logic for NULL
-	//
-	else if (pVal->vt == VT_NULL) {
-		if (!_wcsicmp(wszName, L"SMBIOSBIOSVersion")) {
-			pVal->vt = VT_BSTR;
-			pVal->bstrVal = SysAllocString(L"1.23.1");
-		}
-	}
-}
-
 HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_In_		PVOID	_this,
 	_In_		LONG	lFlags,
@@ -308,85 +206,56 @@ HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_Out_opt_	LONG	*plFlavor
 )
 {
-HRESULT ret;
+	HRESULT ret;
+	HRESULT hr;
 	lasterror_t lasterror;
+	VARIANT classVariant;
+	IWbemClassObject *pWmiObject;
+	WCHAR szClassName[256] = L"";
 
-	/* Most recent real IWbemClassObject any Next call produced, kept so an
-	 * empty enumeration can be back-filled with a valid, callable object
-	 * rather than a fabricated pointer the sample would dereference and crash
-	 * on. AddRef'd when captured and AddRef'd again when handed back, so the
-	 * caller's Release balances out normally. */
-	static IWbemClassObject *last_object = NULL;
+	/* This hook sits on CWbemObject::Next (IWbemClassObject::Next, registered
+	 * in hooks.c by the mangled '?Next@CWbemObject@@...' symbol), which walks
+	 * the PROPERTIES of a single object and yields one name/value pair per
+	 * call - it is not IEnumWbemClassObject::Next, which walks instances.
+	 * So there is no object array or instance count to adjust here; the
+	 * countermeasure for an empty instance enumeration (e.g. a sample counting
+	 * rows of 'SELECT * FROM CIM_Memory') lives in the WMI_ExecQuery hook
+	 * below, which substitutes a query that provably yields instances.
+	 *
+	 * What this hook can do is the same thing WMI_Get does for a directly
+	 * requested property: resolve the owning class and run the enumerated
+	 * value through SpoofWmiData, so a sample that reads memory size, disk
+	 * size, CPU counts, GPU name or the BIOS serial by ENUMERATING properties
+	 * sees the same consistent physical-machine values it would get from
+	 * IWbemClassObject::Get, instead of the sandbox's real ones. */
+	ret = Old_WMI_Next(_this, lFlags, strName, pVal, pType, plFlavor);
 
-	/* Enumerators already given their one forged entry. The first Next on such
-	 * an enumerator returns a single object (WBEM_S_NO_ERROR); every later Next
-	 * on the same enumerator falls through to the real WBEM_S_FALSE/0 result so
-	 * the caller's do/while loop terminates after one row. A small ring is
-	 * enough since only the enumerator currently being walked matters. */
-	static ULONG_PTR served[16];
-	static unsigned int served_idx;
+	/* Nothing to spoof or log: failed call, end of enumeration
+	 * (WBEM_S_NO_MORE_DATA), or no usable name/value pair. */
+	if (ret != S_OK || pVal == NULL || pVal->vt == VT_NULL ||
+			strName == NULL || *strName == NULL)
+		return ret;
 
-	ret = Old_WMI_Next(_this, lTimeout, uCount, ppObjects, puReturned);
+	get_lasterrors(&lasterror);
+	VariantInit(&classVariant);
 
-	/* Samples run 'SELECT * FROM Win32_MemoryArray' through
-	 * IWbemServices::ExecQuery, then walk the returned enumerator with
-	 * IEnumWbemClassObject::Next (flattened here as WMI_Next) and count the
-	 * yielded instances; a freshly-imaged analysis VM exposes no SMBIOS
-	 * Physical Memory Array, so the query result set is empty, Next reports
-	 * WBEM_S_FALSE with *puReturned == 0 on the very first call,
-	 * memoryArrayCount stays 0, and checkCondition() flags the sandbox. The
-	 * query text is not visible at this hook, so we key off the observable
-	 * shape instead: cache the newest real object every successful Next
-	 * produces, and on the first Next for an enumerator that returned nothing,
-	 * hand back one forged instance (that cached object, AddRef'd) and report
-	 * *puReturned = 1 / WBEM_S_NO_ERROR so memoryArrayCount becomes 1 (> 0) and
-	 * checkCondition() reports a genuine user environment. Later Next calls on
-	 * the same enumerator are left at the real WBEM_S_FALSE so the loop ends
-	 * after the single row; the per-property WMI_Get hook keeps whatever the
-	 * sample reads off the object consistent. */
-	if (!g_config.no_stealth) {
-		if (ret == WBEM_S_NO_ERROR && puReturned != NULL && *puReturned >= 1 &&
-				ppObjects != NULL && ppObjects[*puReturned - 1] != NULL) {
-			IWbemClassObject *fresh = ppObjects[*puReturned - 1];
+	__try {
+		/* Get(L"__CLASS") re-enters the WMI_Get hook, which skips its own
+		 * class lookup for __CLASS, so this does not recurse. */
+		pWmiObject = (IWbemClassObject *)_this;
+		hr = pWmiObject->lpVtbl->Get(pWmiObject, L"__CLASS", 0, &classVariant, NULL, NULL);
+		if (SUCCEEDED(hr) && classVariant.vt == VT_BSTR)
+			wcscpy_s(szClassName, _countof(szClassName), classVariant.bstrVal);
 
-			if (fresh != last_object) {
-				fresh->lpVtbl->AddRef(fresh);
-				if (last_object != NULL)
-					last_object->lpVtbl->Release(last_object);
-				last_object = fresh;
-			}
-		} else if (uCount >= 1 && ppObjects != NULL && puReturned != NULL &&
-				last_object != NULL &&
-				(ret == WBEM_S_FALSE || *puReturned == 0)) {
-			ULONG_PTR key = (ULONG_PTR)_this;
-			unsigned int slots = sizeof(served) / sizeof(served[0]);
-			unsigned int i;
-			int already = 0;
-
-			for (i = 0; i < slots; i++) {
-				if (served[i] == key) {
-					already = 1;
-					break;
-				}
-			}
-
-			if (!already) {
-				get_lasterrors(&lasterror);
-
-				last_object->lpVtbl->AddRef(last_object);
-				ppObjects[0] = last_object;
-				*puReturned = 1;
-				ret = WBEM_S_NO_ERROR;
-
-				served[served_idx % slots] = key;
-				served_idx++;
-
-				set_lasterrors(&lasterror);
-			}
-		}
+		SpoofWmiData(szClassName, *strName, pVal);
+		LOQ_hresult("system", "unu", "Name", *strName, "Value", pVal, "Class", szClassName);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		LOQ_hresult("system", "un", "Name", *strName, "Value", pVal);
 	}
 
-	LOQ_hresult("system", "pi", "Object", _this, "Count", uCount);
+	VariantClear(&classVariant);
+	set_lasterrors(&lasterror);
 	return ret;
 }
 
