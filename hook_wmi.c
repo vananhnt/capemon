@@ -197,6 +197,110 @@ HRESULT ret;
 
 /* shared dispatch helper(s) called above — extend these, not the wrapper */
 
+void SpoofWmiData(const wchar_t* szClassName, const wchar_t* wszName, VARIANT* pVal) {
+	if (g_config.no_stealth)
+		return;
+
+	if (!szClassName || !wszName || !pVal)
+		return;
+
+	//
+	// Spoofery logic for BSTR (wchar_t *)
+	//
+	if (pVal->vt == VT_BSTR && pVal->bstrVal) {
+		if (!_wcsicmp(pVal->bstrVal, L"Microsoft Basic Display Adapter")) {
+			SysFreeString(pVal->bstrVal);
+			pVal->bstrVal = SysAllocString(SPOOFED_GPU_NAME);
+		}
+		else if (!_wcsicmp(wszName, L"TotalPhysicalMemory")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			if (actualMemory < SPOOFED_RAM) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
+			}
+		}
+		else if (!_wcsicmp(wszName, L"TotalVisibleMemorySize")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			// actualMemory is in Kilobytes, our spoofed values are in bytes
+			if (actualMemory < (SPOOFED_RAM / 1024)) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM_IN_KB);
+			}
+		}
+		//
+		// Logic for BSTR fakery specific to an exact szClassName
+		//
+		else if (!_wcsicmp(szClassName, L"Win32_LogicalDisk") && !_wcsicmp(wszName, L"Size")) {
+			unsigned long long lSize = wcstoull(pVal->bstrVal, NULL, 10);
+			if (lSize < SPOOFED_DISK_SIZE - RECOVERY_PARTITION_SIZE) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_DISK_LOGICAL_SIZE);
+			}
+		}
+		else if (!_wcsicmp(szClassName, L"Win32_PhysicalMemory") && !_wcsicmp(wszName, L"Capacity")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			if (actualMemory < SPOOFED_RAM) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
+			}
+		}
+		//
+		// Samples read Win32_BIOS.SerialNumber and flag the VM when it
+		// matches biosSerialNumber LIKE '%VMWare%'/'%Xen%'/'%Virtual%'/
+		// '%A M I%' OR == '0'. Replace it with a plausible OEM service-tag
+		// style serial that hits none of those signatures.
+		//
+		else if (!_wcsicmp(szClassName, L"Win32_BIOS") && !_wcsicmp(wszName, L"SerialNumber")) {
+			SysFreeString(pVal->bstrVal);
+			pVal->bstrVal = SysAllocString(L"7XKQZ13");
+		}
+	}
+	//
+	// Spoofery logic for I4 (Signed 32-bit integer)
+	//
+	else if (pVal->vt == VT_I4) {
+		if (!_wcsicmp(szClassName, L"Win32_Processor") && !_wcsicmp(wszName, L"ThreadCount")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfCores")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfLogicalProcessors")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfEnabledCore")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"AdapterRAM")) {
+			if (SPOOFED_GPU_RAM > 0x7FFFFFFFULL) {
+				// Mimic overflowing the I4 if you have >2GB of Spoofed GPU RAM
+				pVal->lVal = 0x7FFFFFFF;
+			}
+			else {
+				// Cast to LONG to avoid compiler warning if SPOOFED_GPU_RAM is >2GB
+				if (pVal->lVal < (LONG)SPOOFED_GPU_RAM) {
+					pVal->lVal = (LONG)SPOOFED_GPU_RAM;
+				}
+			}
+		}
+	}
+	//
+	// Spoofery logic for NULL
+	//
+	else if (pVal->vt == VT_NULL) {
+		if (!_wcsicmp(wszName, L"SMBIOSBIOSVersion")) {
+			pVal->vt = VT_BSTR;
+			pVal->bstrVal = SysAllocString(L"1.23.1");
+		}
+	}
+}
+
+/* shared dispatch helper(s) called above — extend these, not the wrapper */
+
 HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_In_		PVOID	_this,
 	_In_		LONG	lFlags,
@@ -268,10 +372,71 @@ HOOKDEF(HRESULT, WINAPI, WMI_ExecQuery,
 	_Out_	IEnumWbemClassObject	**ppEnum
 )
 {
-HRESULT ret;
+static const wchar_t forced_query[] = L"SELECT * FROM Win32_PhysicalMemory";
+	HRESULT ret;
+	lasterror_t lasterror;
+	IEnumWbemClassObject *test_enum;
+	HRESULT hr_test;
 
 	ret = Old_WMI_ExecQuery(_this, strQueryLanguage, strQuery, lFlags, pCtx,
 		ppEnum);
+
+	/* Samples run the WQL query 'SELECT * FROM CIM_Memory' through
+	 * IWbemServices::ExecQuery — aliased here as WMI_ExecQuery — and then walk
+	 * the returned IEnumWbemClassObject with ::Next, counting rows. They never
+	 * read a property; the verdict is purely the instance count, so a
+	 * WMI_Get/WMI_Next property spoof is useless here. CIM_Memory is an abstract
+	 * CIM base class that Windows does not populate with concrete instances, so
+	 * on a bare analysis VM the enumerator comes back empty, the row count is
+	 * zero, and checkCondition() takes its evasion branch. To keep the sample on
+	 * its user-environment path we must make the enumerator the caller receives
+	 * yield at least one row. We first probe the count on a throwaway enumerator
+	 * (re-issuing the same query via the original API) so the caller's own
+	 * enumerator and its cursor are never disturbed by our ::Next peek. If that
+	 * probe yields a row, CIM_Memory is populated after all and we leave the
+	 * caller's result untouched. If it is empty, we re-issue the query against
+	 * the concrete, always-populated class Win32_PhysicalMemory, release the
+	 * caller's empty enumerator, and hand back the populated one so the row
+	 * count is non-zero. All intermediate COM references and the forged query
+	 * BSTR are released. Lasterror is preserved around the forged response. */
+	if (!g_config.no_stealth && ret == S_OK && ppEnum != NULL && *ppEnum != NULL &&
+		strQuery != NULL && wcsstr(strQuery, L"CIM_Memory") != NULL) {
+		get_lasterrors(&lasterror);
+
+		test_enum = NULL;
+		hr_test = Old_WMI_ExecQuery(_this, strQueryLanguage, strQuery, lFlags,
+			pCtx, &test_enum);
+
+		if (hr_test == S_OK && test_enum != NULL) {
+			IWbemClassObject *obj = NULL;
+			ULONG returned = 0;
+
+			if (test_enum->lpVtbl->Next(test_enum, WBEM_INFINITE, 1, &obj,
+				&returned) == S_OK && returned > 0) {
+				/* CIM_Memory is populated — nothing to forge. */
+				if (obj != NULL)
+					obj->lpVtbl->Release(obj);
+			}
+			else {
+				BSTR forged = SysAllocString(forced_query);
+				IEnumWbemClassObject *new_enum = NULL;
+
+				if (forged != NULL) {
+					if (Old_WMI_ExecQuery(_this, strQueryLanguage, forged, lFlags,
+						pCtx, &new_enum) == S_OK && new_enum != NULL) {
+						(*ppEnum)->lpVtbl->Release(*ppEnum);
+						*ppEnum = new_enum;
+						ret = S_OK;
+					}
+					SysFreeString(forged);
+				}
+			}
+
+			test_enum->lpVtbl->Release(test_enum);
+		}
+
+		set_lasterrors(&lasterror);
+	}
 
 	LOQ_hresult("system", "uu", "QueryLanguage", strQueryLanguage,
 		"Query", strQuery);

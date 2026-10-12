@@ -387,7 +387,14 @@ typedef LONG (WINAPI *NtQueryKey_t)(HANDLE, int, PVOID, ULONG, PULONG);
 	 * key we hand back one forged paired-device subkey name ("0017895e1b01") with
 	 * ERROR_SUCCESS so the loop sees at least one device and the companion
 	 * RegOpenKeyExA/RegQueryValueExA hooks can serve that subkey's Name /
-	 * ConnectionType consistently. Lasterror is preserved around the swap. */
+	 * ConnectionType consistently. Lasterror is preserved around the swap.
+	 *
+	 * This runtime swap is only a fallback: the persistent plant normally seeds
+	 * a real device subkey, so we act solely when the live enumeration at index
+	 * 0 came back empty (ret != ERROR_SUCCESS, i.e. ERROR_NO_MORE_ITEMS on a
+	 * reverted plant). When a genuine device is already present we leave it, and
+	 * subsequent indices keep returning ERROR_NO_MORE_ITEMS naturally so the
+	 * caller counts exactly one paired device. */
 	if (!g_config.no_stealth && dwIndex == 0 && hKey != NULL) {
 		get_lasterrors(&lasterror);
 
@@ -442,8 +449,8 @@ typedef LONG (WINAPI *NtQueryKey_t)(HANDLE, int, PVOID, ULONG, PULONG);
 			}
 		}
 
-		if (is_bthport_devices && lpName != NULL && lpcName != NULL &&
-				*lpcName > forged_len) {
+		if (is_bthport_devices && ret != ERROR_SUCCESS && lpName != NULL &&
+				lpcName != NULL && *lpcName > forged_len) {
 			memcpy(lpName, forged_subkey, forged_len + 1);
 			*lpcName = forged_len;
 

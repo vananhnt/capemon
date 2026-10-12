@@ -9,6 +9,36 @@
 #include <winspool.h>
 #include "log.h"
 #include "config.h"
+        HOOKDEF(VOID, WINAPI, GetNativeSystemInfo, LPSYSTEM_INFO lpSystemInfo)
+        {
+            int ret = 0;
+	lasterror_t lasterror;
+
+	Old_GetNativeSystemInfo(lpSystemInfo);
+
+	/* Shares the SYSTEM_INFO.dwNumberOfProcessors evasion check with
+	 * GetSystemInfo: samples read the processor count and treat a value of 1
+	 * or fewer as proof of an under-provisioned analysis VM, taking their
+	 * evasion branch unless processorCount > 1. GetNativeSystemInfo exposes the
+	 * same field and is listed in the sample's hook recommendations, so we
+	 * cover it here to prevent a fallback read that would bypass the
+	 * GetSystemInfo forge. After the original call populates lpSystemInfo we
+	 * overwrite dwNumberOfProcessors with 4 so the processorCount > 1 branch is
+	 * taken and the sample stays on its user-environment path. Lasterror is
+	 * preserved around the forged response. */
+	if (!g_config.no_stealth && lpSystemInfo != NULL) {
+		get_lasterrors(&lasterror);
+
+		lpSystemInfo->dwNumberOfProcessors = SPOOFED_CPU_CORE_NUM;
+
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_void("misc", "i", "NumberOfProcessors",
+		lpSystemInfo != NULL ? lpSystemInfo->dwNumberOfProcessors : 0);
+	return;
+        }
+
         HOOKDEF(BOOL, WINAPI, EnumPrintersA, DWORD Flags, LPSTR Name, DWORD Level, LPBYTE pPrinterEnum, DWORD cbBuf, LPDWORD pcbNeeded, LPDWORD pcReturned)
         {
             static const char forced_printer[] = "HP LaserJet 1020";
