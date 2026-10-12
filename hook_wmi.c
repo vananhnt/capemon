@@ -197,6 +197,110 @@ HRESULT ret;
 
 /* shared dispatch helper(s) called above — extend these, not the wrapper */
 
+void SpoofWmiData(const wchar_t* szClassName, const wchar_t* wszName, VARIANT* pVal) {
+	if (g_config.no_stealth)
+		return;
+
+	if (!szClassName || !wszName || !pVal)
+		return;
+
+	//
+	// Spoofery logic for BSTR (wchar_t *)
+	//
+	if (pVal->vt == VT_BSTR && pVal->bstrVal) {
+		if (!_wcsicmp(pVal->bstrVal, L"Microsoft Basic Display Adapter")) {
+			SysFreeString(pVal->bstrVal);
+			pVal->bstrVal = SysAllocString(SPOOFED_GPU_NAME);
+		}
+		else if (!_wcsicmp(wszName, L"TotalPhysicalMemory")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			if (actualMemory < SPOOFED_RAM) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
+			}
+		}
+		else if (!_wcsicmp(wszName, L"TotalVisibleMemorySize")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			// actualMemory is in Kilobytes, our spoofed values are in bytes
+			if (actualMemory < (SPOOFED_RAM / 1024)) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM_IN_KB);
+			}
+		}
+		//
+		// Logic for BSTR fakery specific to an exact szClassName
+		//
+		else if (!_wcsicmp(szClassName, L"Win32_LogicalDisk") && !_wcsicmp(wszName, L"Size")) {
+			unsigned long long lSize = wcstoull(pVal->bstrVal, NULL, 10);
+			if (lSize < SPOOFED_DISK_SIZE - RECOVERY_PARTITION_SIZE) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_DISK_LOGICAL_SIZE);
+			}
+		}
+		else if (!_wcsicmp(szClassName, L"Win32_PhysicalMemory") && !_wcsicmp(wszName, L"Capacity")) {
+			unsigned long long actualMemory = wcstoull(pVal->bstrVal, NULL, 10);
+			if (actualMemory < SPOOFED_RAM) {
+				SysFreeString(pVal->bstrVal);
+				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM);
+			}
+		}
+		//
+		// Samples read Win32_BIOS.SerialNumber and flag the VM when it
+		// matches biosSerialNumber LIKE '%VMWare%'/'%Xen%'/'%Virtual%'/
+		// '%A M I%' OR == '0'. Replace it with a plausible OEM service-tag
+		// style serial that hits none of those signatures.
+		//
+		else if (!_wcsicmp(szClassName, L"Win32_BIOS") && !_wcsicmp(wszName, L"SerialNumber")) {
+			SysFreeString(pVal->bstrVal);
+			pVal->bstrVal = SysAllocString(L"7XKQZ13");
+		}
+	}
+	//
+	// Spoofery logic for I4 (Signed 32-bit integer)
+	//
+	else if (pVal->vt == VT_I4) {
+		if (!_wcsicmp(szClassName, L"Win32_Processor") && !_wcsicmp(wszName, L"ThreadCount")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfCores")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfLogicalProcessors")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"NumberOfEnabledCore")) {
+			if (pVal->lVal < SPOOFED_CPU_CORE_NUM)
+				pVal->lVal = SPOOFED_CPU_CORE_NUM;
+		}
+		else if (!_wcsicmp(wszName, L"AdapterRAM")) {
+			if (SPOOFED_GPU_RAM > 0x7FFFFFFFULL) {
+				// Mimic overflowing the I4 if you have >2GB of Spoofed GPU RAM
+				pVal->lVal = 0x7FFFFFFF;
+			}
+			else {
+				// Cast to LONG to avoid compiler warning if SPOOFED_GPU_RAM is >2GB
+				if (pVal->lVal < (LONG)SPOOFED_GPU_RAM) {
+					pVal->lVal = (LONG)SPOOFED_GPU_RAM;
+				}
+			}
+		}
+	}
+	//
+	// Spoofery logic for NULL
+	//
+	else if (pVal->vt == VT_NULL) {
+		if (!_wcsicmp(wszName, L"SMBIOSBIOSVersion")) {
+			pVal->vt = VT_BSTR;
+			pVal->bstrVal = SysAllocString(L"1.23.1");
+		}
+	}
+}
+
+/* shared dispatch helper(s) called above — extend these, not the wrapper */
+
 HOOKDEF(HRESULT, WINAPI, WMI_Next,
 	_In_		PVOID	_this,
 	_In_		LONG	lFlags,
@@ -269,176 +373,12 @@ HOOKDEF(HRESULT, WINAPI, WMI_ExecQuery,
 )
 {
 HRESULT ret;
-	HRESULT hr;
-	lasterror_t lasterror;
-	IEnumWbemClassObject *pClone;
-	IEnumWbemClassObject *pSubstEnum;
-	IWbemClassObject *pProbe;
-	BSTR bstrLang;
-	BSTR bstrQuery;
-	VARIANT vSize;
-	ULONG uReturned;
-	const wchar_t *subst[2];
-	int nsubst;
-	int i;
-	int isMem;
-	int isDisk;
-	int probeKnown;
-	int origEmpty;
-	int swapped;
 
-	ret = Old_WMI_ExecQuery(_this, strQueryLanguage, strQuery, lFlags, pCtx, ppEnum);
+	ret = Old_WMI_ExecQuery(_this, strQueryLanguage, strQuery, lFlags, pCtx,
+		ppEnum);
 
-	/* Why the previous body did nothing: it only recorded *ppEnum into
-	 * function-local static "tag tables" that no other code ever reads. The
-	 * actual property forgery in this DLL lives in SpoofWmiData(), which the
-	 * WMI_Get / WMI_Next hooks call after resolving __CLASS from the object
-	 * itself - it never consults an enumerator tag. So the sample still got
-	 * the sandbox's real result set.
-	 *
-	 * For 'SELECT * FROM CIM_Memory' the detection is not a bad property
-	 * value, it is an EMPTY enumerator: CIM_Memory is abstract and its
-	 * concrete subclasses are frequently absent under a hypervisor, so the
-	 * instance count is zero and no per-property spoof can repair that.
-	 *
-	 * The fix does the one thing only ExecQuery can do: guarantee the caller
-	 * receives an enumerator that actually yields at least one instance. If a
-	 * targeted query came back empty (or failed), re-issue it against a class
-	 * that does have instances and return that enumerator instead. Every
-	 * property the sample then reads off those objects still flows through
-	 * WMI_Get / WMI_Next -> SpoofWmiData, so Capacity and Size come back with
-	 * the forged values. */
-	isMem = 0;
-	isDisk = 0;
-	if (!g_config.no_stealth && strQuery != NULL && ppEnum != NULL) {
-		isMem = (wcsstr(strQuery, L"CIM_Memory") != NULL);
-		isDisk = (!isMem && wcsstr(strQuery, L"Win32_LogicalDisk") != NULL);
-	}
-
-	if (isMem || isDisk) {
-		get_lasterrors(&lasterror);
-
-		probeKnown = 0;
-		origEmpty = 0;
-		swapped = 0;
-
-		/* Find out whether the real result set is empty WITHOUT disturbing it:
-		 * Clone() hands back an independent enumerator at the same position, so
-		 * consuming one object from the clone leaves the caller's enumerator
-		 * untouched. Clone() fails on WBEM_FLAG_FORWARD_ONLY enumerators; then
-		 * we simply do not know (probeKnown stays 0) and stay conservative. */
-		if (SUCCEEDED(ret) && *ppEnum != NULL) {
-			__try {
-				pClone = NULL;
-				hr = (*ppEnum)->lpVtbl->Clone(*ppEnum, &pClone);
-				if (SUCCEEDED(hr) && pClone != NULL) {
-					pProbe = NULL;
-					uReturned = 0;
-					hr = pClone->lpVtbl->Next(pClone, 2000, 1, &pProbe, &uReturned);
-					probeKnown = 1;
-					origEmpty = (uReturned == 0);
-					if (pProbe != NULL)
-						pProbe->lpVtbl->Release(pProbe);
-					pClone->lpVtbl->Release(pClone);
-				}
-			}
-			__except (EXCEPTION_EXECUTE_HANDLER) {
-				probeKnown = 0;
-			}
-		}
-		else {
-			probeKnown = 1;
-			origEmpty = 1;
-		}
-
-		nsubst = 0;
-		if (isMem && (origEmpty || !probeKnown)) {
-			/* Win32_CacheMemory is a genuine CIM_Memory subclass, so an
-			 * instance-count or __CLASS check still sees a CIM_Memory-derived
-			 * object; Win32_PhysicalMemory is the fallback and its Capacity is
-			 * already floored to SPOOFED_RAM by SpoofWmiData. */
-			subst[0] = L"SELECT * FROM Win32_CacheMemory";
-			subst[1] = L"SELECT * FROM Win32_PhysicalMemory";
-			nsubst = 2;
-		}
-		else if (isDisk && probeKnown && origEmpty) {
-			/* Only when the fixed-disk query provably returned nothing: give
-			 * the sample a real Win32_LogicalDisk instance to read Size from.
-			 * A disk query that already yields rows is left completely alone,
-			 * so samples currently classified realuser cannot regress. */
-			subst[0] = L"SELECT * FROM Win32_LogicalDisk WHERE DriveType=3";
-			subst[1] = L"SELECT * FROM Win32_LogicalDisk";
-			nsubst = 2;
-		}
-
-		for (i = 0; i < nsubst && !swapped; i++) {
-			pSubstEnum = NULL;
-			bstrLang = SysAllocString(L"WQL");
-			bstrQuery = SysAllocString(subst[i]);
-			if (bstrLang != NULL && bstrQuery != NULL) {
-				/* semi-synchronous (deliberately no WBEM_FLAG_FORWARD_ONLY) so
-				 * the substitute can be probed via Clone and still be walked
-				 * from the beginning by the caller afterwards */
-				hr = Old_WMI_ExecQuery(_this, bstrLang, bstrQuery,
-					WBEM_FLAG_RETURN_IMMEDIATELY, pCtx, &pSubstEnum);
-				if (SUCCEEDED(hr) && pSubstEnum != NULL) {
-					__try {
-						pClone = NULL;
-						hr = pSubstEnum->lpVtbl->Clone(pSubstEnum, &pClone);
-						if (SUCCEEDED(hr) && pClone != NULL) {
-							pProbe = NULL;
-							uReturned = 0;
-							hr = pClone->lpVtbl->Next(pClone, 2000, 1, &pProbe, &uReturned);
-							if (SUCCEEDED(hr) && uReturned == 1 && pProbe != NULL) {
-								if (isDisk) {
-									/* Belt and braces on top of the SpoofWmiData
-									 * floor: write the forced 100 GB transparency
-									 * value straight into the instance. Size is a
-									 * CIM uint64, which WMI accepts as a decimal
-									 * BSTR. Failure is ignored - WMI_Get/WMI_Next
-									 * still force the value on read. */
-									VariantInit(&vSize);
-									vSize.vt = VT_BSTR;
-									vSize.bstrVal = SysAllocString(L"107374182400");
-									if (vSize.bstrVal != NULL)
-										pProbe->lpVtbl->Put(pProbe, L"Size", 0, &vSize, 0);
-									VariantClear(&vSize);
-								}
-								swapped = 1;
-							}
-							if (pProbe != NULL)
-								pProbe->lpVtbl->Release(pProbe);
-							pClone->lpVtbl->Release(pClone);
-						}
-
-						/* only hand over an enumerator we have proven yields at
-						 * least one object */
-						if (swapped) {
-							if (SUCCEEDED(ret) && *ppEnum != NULL)
-								(*ppEnum)->lpVtbl->Release(*ppEnum);
-							*ppEnum = pSubstEnum;
-							pSubstEnum = NULL;
-							ret = S_OK;
-						}
-					}
-					__except (EXCEPTION_EXECUTE_HANDLER) {
-						swapped = 0;
-					}
-
-					if (pSubstEnum != NULL)
-						pSubstEnum->lpVtbl->Release(pSubstEnum);
-				}
-			}
-			if (bstrQuery != NULL)
-				SysFreeString(bstrQuery);
-			if (bstrLang != NULL)
-				SysFreeString(bstrLang);
-		}
-
-		set_lasterrors(&lasterror);
-	}
-
-	LOQ_hresult("system", "uu", "Query", strQuery, "QueryLanguage", strQueryLanguage);
+	LOQ_hresult("system", "uu", "QueryLanguage", strQueryLanguage,
+		"Query", strQuery);
 	return ret;
 }
 
