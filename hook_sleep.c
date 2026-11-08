@@ -634,6 +634,20 @@ int ret = 0;
 	return;
 }
 
+// SAGE: anti-time-acceleration timer accelerator. Samples schedule a very long
+// one-shot timer (e.g. 5 min, longer than the analysis window), wait for its
+// callback, then compare the elapsed time (GetTickCount64, already compensated)
+// against the requested delay; if it fired "too early" they flag a sandbox, and
+// if it never fires in-window the process just hangs (NO-BEACON). To keep the
+// virtual clock coherent we shrink the long delay so the callback fires inside
+// the window AND advance time_skipped by the amount we removed, so GetTickCount64
+// at the callback still reports the full requested elapsed -> measured ~= requested.
+// Mirrors the NtSetTimer clamp above. Target stays below max-wait-ms so the
+// sample's own bounded wait catches the early callback.
+#define SAGE_TIMER_MIN_MS   30000u
+#define SAGE_TIMER_MAX_MS   3600000u
+#define SAGE_TIMER_FIRE_MS  5000u
+
 HOOKDEF(DWORD, WINAPI, timeSetEvent,
    UINT           uDelay,
    UINT           uResolution,
@@ -641,7 +655,13 @@ HOOKDEF(DWORD, WINAPI, timeSetEvent,
    DWORD_PTR      dwUser,
    UINT           fuEvent
 ) {
-	DWORD ret = Old_timeSetEvent(uDelay, uResolution, lpTimeProc, dwUser, fuEvent);
+	UINT newDelay = uDelay;
+	if (sleep_skip_active && g_config.force_sleepskip > 0 &&
+	    uDelay >= SAGE_TIMER_MIN_MS && uDelay <= SAGE_TIMER_MAX_MS) {
+		newDelay = SAGE_TIMER_FIRE_MS;
+		time_skipped.QuadPart += ((LONGLONG)uDelay - (LONGLONG)newDelay) * 10000LL;
+	}
+	DWORD ret = Old_timeSetEvent(newDelay, uResolution, lpTimeProc, dwUser, fuEvent);
 	LOQ_bool("system", "ip", "Delay", uDelay, "TimeProc", lpTimeProc);
 	return ret;
 }
@@ -655,10 +675,56 @@ HOOKDEF(BOOL, WINAPI, CreateTimerQueueTimer,
   _In_		DWORD				Period,
   _In_		ULONG				Flags
 ) {
-	BOOL ret = Old_CreateTimerQueueTimer(phNewTimer, TimerQueue, Callback, Parameter, DueTime, Period, Flags);
+	DWORD newDue = DueTime;
+	if (sleep_skip_active && g_config.force_sleepskip > 0 &&
+	    DueTime >= SAGE_TIMER_MIN_MS && DueTime <= SAGE_TIMER_MAX_MS) {
+		newDue = SAGE_TIMER_FIRE_MS;
+		time_skipped.QuadPart += ((LONGLONG)DueTime - (LONGLONG)newDue) * 10000LL;
+	}
+	BOOL ret = Old_CreateTimerQueueTimer(phNewTimer, TimerQueue, Callback, Parameter, newDue, Period, Flags);
 	LOQ_bool("system", "Pphhiii", "phNewTimer", phNewTimer, "TimerQueue", TimerQueue, "Callback", Callback, "Parameter", Parameter, "DueTime", DueTime, "Period", Period, "Flags", Flags);
 	return ret;
 }
+
+// SAGE: thread-pool timer accelerator (CreateThreadpoolTimer/SetThreadpoolTimer).
+// The due time is a *relative* (negative) FILETIME in 100ns units. Same treatment
+// as the timers above: shrink a long relative due time and bank the remainder in
+// time_skipped so GetTickCount64 in the callback reports the requested elapsed.
+HOOKDEF(VOID, WINAPI, SetThreadpoolTimer,
+	_Inout_	PTP_TIMER	pti,
+	_In_opt_ PFILETIME	pftDueTime,
+	_In_	DWORD		msPeriod,
+	_In_	DWORD		msWindowLength
+) {
+	FILETIME newDue;
+	PFILETIME pDue = pftDueTime;
+	DWORD ret = 0;
+	if (sleep_skip_active && g_config.force_sleepskip > 0 && pftDueTime) {
+		LARGE_INTEGER li;
+		li.LowPart = pftDueTime->dwLowDateTime;
+		li.HighPart = (LONG)pftDueTime->dwHighDateTime;
+		if (li.QuadPart < 0) {		/* relative due time */
+			LONGLONG ms = (-li.QuadPart) / 10000LL;
+			if (ms >= (LONGLONG)SAGE_TIMER_MIN_MS && ms <= (LONGLONG)SAGE_TIMER_MAX_MS) {
+				time_skipped.QuadPart += (ms - (LONGLONG)SAGE_TIMER_FIRE_MS) * 10000LL;
+				li.QuadPart = -((LONGLONG)SAGE_TIMER_FIRE_MS * 10000LL);
+				newDue.dwLowDateTime = li.LowPart;
+				newDue.dwHighDateTime = (DWORD)li.HighPart;
+				pDue = &newDue;
+			}
+		}
+	}
+	Old_SetThreadpoolTimer(pti, pDue, msPeriod, msWindowLength);
+	LOQ_void("system", "");
+	return;
+}
+
+// NOTE: QPC-based sleep-skew (sample 154) is deliberately NOT addressed here.
+// kernel32 QueryPerformanceCounter is already hooked in hook_mirage.c, but that
+// hook REMAPS the counter to the sample's consumed CPU time (busy-loop CPU-vs-wall
+// ratio defense). A sleep-skip compensation would both duplicate the symbol and
+// fight that remap (a sleeping sample burns no CPU, so the remap reports ~0 wall
+// progress). Reconciling the two QPC defenses is tracked separately.
 
 static int lastinput_called;
 

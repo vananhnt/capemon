@@ -599,6 +599,7 @@ hook_t full_hooks[] = {
 	HOOK(ntdll, NtSetTimerEx),
 	HOOK(user32, MsgWaitForMultipleObjectsEx),
 	HOOK(kernel32, CreateTimerQueueTimer),
+	HOOK(kernel32, SetThreadpoolTimer),
 
 	// Socket Hooks
 	HOOK(ws2_32, WSAStartup),
@@ -1504,10 +1505,12 @@ hook_t office_hooks[] = {
 	HOOK_SPECIAL(ntdll, NtQuerySystemTime),
 	HOOK(user32, GetLastInputInfo),
 	HOOK_SPECIAL(winmm, timeGetTime),
+	HOOK(winmm, timeSetEvent),
 	HOOK(ntdll, NtSetTimer),
 	HOOK(ntdll, NtSetTimerEx),
 	HOOK(user32, MsgWaitForMultipleObjectsEx),
 	HOOK(kernel32, CreateTimerQueueTimer),
+	HOOK(kernel32, SetThreadpoolTimer),
 
 	// Socket Hooks
 	HOOK(ws2_32, WSAStartup),

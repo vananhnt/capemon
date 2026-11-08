@@ -2761,6 +2761,13 @@ HOOKDEF(BOOL, WINAPI, CreateTimerQueueTimer,
   _In_	 ULONG			   Flags
 );
 
+HOOKDEF(VOID, WINAPI, SetThreadpoolTimer,
+	_Inout_	PTP_TIMER	pti,
+	_In_opt_ PFILETIME	pftDueTime,
+	_In_	DWORD		msPeriod,
+	_In_	DWORD		msWindowLength
+);
+
 //
 // Socket Hooks
 //
