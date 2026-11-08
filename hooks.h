@@ -2733,6 +2733,11 @@ HOOKDEF(void, WINAPI, GetSystemTimeAsFileTime,
 	_Out_ LPFILETIME lpSystemTimeAsFileTime
 );
 
+HOOKDEF(void, WINAPI, GetSystemTimePreciseAsFileTime,
+	_Out_ LPFILETIME lpSystemTimeAsFileTime
+);
+
+
 HOOKDEF(DWORD, WINAPI, timeSetEvent,
    UINT           uDelay,
    UINT           uResolution,

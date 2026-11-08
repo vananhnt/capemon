@@ -634,6 +634,50 @@ int ret = 0;
 	return;
 }
 
+HOOKDEF(void, WINAPI, GetSystemTimePreciseAsFileTime,
+	_Out_ LPFILETIME lpSystemTimeAsFileTime
+)
+{
+	DWORD low = 0;
+	DWORD high = 0;
+	lasterror_t lasterror;
+	ULARGE_INTEGER u;
+
+	Old_GetSystemTimePreciseAsFileTime(lpSystemTimeAsFileTime);
+
+	/* SAGE: MSVC std::chrono::system_clock::now() and _Xtime_get_ticks (the
+	 * clock std::this_thread::sleep_for brackets against) resolve to
+	 * GetSystemTimePreciseAsFileTime on Win8+. The GetSystemTimeAsFileTime /
+	 * NtQuerySystemTime design comments above mirror their skew onto "the precise
+	 * wall-clock" but this API was never actually hooked, so it alone returned
+	 * un-skewed real time. A sleep_for deadline loop reading this source therefore
+	 * never saw time_skipped advance, never met its target, and spun out the whole
+	 * analysis window (sample hung in init before its check ran). Mirror
+	 * GetSystemTimeAsFileTime exactly: advance this wall-clock by the shared
+	 * time_skipped (already FILETIME 100ns units) so every time view stays mutually
+	 * consistent and the loop exits. lasterror preserved. */
+	if (!g_config.no_stealth && lpSystemTimeAsFileTime != NULL) {
+		get_lasterrors(&lasterror);
+
+		u.LowPart = lpSystemTimeAsFileTime->dwLowDateTime;
+		u.HighPart = lpSystemTimeAsFileTime->dwHighDateTime;
+		u.QuadPart += (ULONGLONG)time_skipped.QuadPart;
+		lpSystemTimeAsFileTime->dwLowDateTime = u.LowPart;
+		lpSystemTimeAsFileTime->dwHighDateTime = u.HighPart;
+
+		set_lasterrors(&lasterror);
+	}
+
+	if (lpSystemTimeAsFileTime != NULL) {
+		low = lpSystemTimeAsFileTime->dwLowDateTime;
+		high = lpSystemTimeAsFileTime->dwHighDateTime;
+	}
+
+	LOQ_void("system", "pii", "lpSystemTimeAsFileTime", lpSystemTimeAsFileTime, "dwLowDateTime", low, "dwHighDateTime", high);
+
+	return;
+}
+
 HOOKDEF(DWORD, WINAPI, timeSetEvent,
    UINT           uDelay,
    UINT           uResolution,
