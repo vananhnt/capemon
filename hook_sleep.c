@@ -75,6 +75,12 @@ HOOKDEF(NTSTATUS, WINAPI, NtWaitForSingleObject,
 		if (hook_info()->main_caller_retaddr)
 			LOQ_ntstatus("system", "pis", "Handle", Handle, "Milliseconds", -1, "Status", "Infinite");
 		set_lasterrors(&lasterror);
+		// SAGE: cap the unbounded wait so a check blocked on a never-signaled
+		// object returns (WAIT_TIMEOUT) and can still reach its verdict branch.
+		if (sleep_skip_active && g_config.max_wait_ms > 0 && hook_info()->main_caller_retaddr) {
+			newint.QuadPart = -((LONGLONG)g_config.max_wait_ms * 10000LL);
+			return Old_NtWaitForSingleObject(Handle, Alertable, &newint);
+		}
 		return Old_NtWaitForSingleObject(Handle, Alertable, Timeout);
 	}
 

@@ -183,6 +183,11 @@ void parse_config_line(char* line)
 			if (!g_config.force_sleepskip)
 				disable_sleep_skip();
 		}
+		else if (!strcmp(key, "max-wait-ms")) { // SAGE: cap INFINITE waits/sleeps to this many ms (0 = off) so evasion checks blocked on a never-signaled object still reach a verdict.
+			g_config.max_wait_ms = atoi(value);
+			if (g_config.max_wait_ms < 0)
+				g_config.max_wait_ms = 0;
+		}
 		else if (!strcmp(key, "serial")) { //Spoof the serial of the system volume as the provided hex value
 			g_config.serial_number = (unsigned int)strtoul(value, NULL, 16);
 		}
@@ -1459,6 +1464,7 @@ void read_config(void)
 	// config defaults
 	g_config.debugger = 1;
 	g_config.force_sleepskip = -1;
+	g_config.max_wait_ms = 0;
 #ifdef _WIN64
 	g_config.hook_type = HOOK_JMP_INDIRECT;
 #else

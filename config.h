@@ -110,6 +110,11 @@ struct _g_config {
 	// do we force sleep-skipping despite threads?
 	int force_sleepskip;
 
+	// SAGE: cap unbounded (INFINITE) waits/sleeps to this many ms so that
+	// input- or timer-gated evasion checks reach their decision branch instead
+	// of blocking to the analysis ceiling. 0 = disabled (pass INFINITE through).
+	int max_wait_ms;
+
 	// do we force flushing of each log?
 	int force_flush;
 
