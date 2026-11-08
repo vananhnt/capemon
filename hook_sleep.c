@@ -495,15 +495,25 @@ HOOKDEF(DWORD, WINAPI, GetTickCount,
 HOOKDEF(ULONGLONG, WINAPI, GetTickCount64,
 	void
 ) {
-	ULONGLONG ret;
+	ULONGLONG ret, raw;
 
 	FORCE_FRAME_PTR_USE();
 
-	ret = raw_gettickcount64();
+	raw = raw_gettickcount64();
+	ret = raw;
 
 	// add the time we've skipped
 	if (sleep_skip_active)
 		ret += (time_skipped.QuadPart / 10000);
+
+	{	/* SAGE DEBUG: trace tick compensation vs time_skipped per thread */
+		static int _sage_gtc_n = 0;
+		if (_sage_gtc_n < 120) { _sage_gtc_n++;
+			DebugOutput("SAGE_GTC64 tid=%u active=%d raw=%llu skip_ms=%lld ret=%llu\n",
+				GetCurrentThreadId(), sleep_skip_active, (unsigned long long)raw,
+				(long long)(time_skipped.QuadPart / 10000), (unsigned long long)ret);
+		}
+	}
 
 	return ret;
 }
@@ -661,6 +671,9 @@ HOOKDEF(DWORD, WINAPI, timeSetEvent,
 		newDelay = SAGE_TIMER_FIRE_MS;
 		time_skipped.QuadPart += ((LONGLONG)uDelay - (LONGLONG)newDelay) * 10000LL;
 	}
+	DebugOutput("SAGE_TSE tid=%u active=%d fss=%d uDelay=%u new=%u skip_ms=%lld\n",
+		GetCurrentThreadId(), sleep_skip_active, g_config.force_sleepskip,
+		uDelay, newDelay, (long long)(time_skipped.QuadPart / 10000));
 	DWORD ret = Old_timeSetEvent(newDelay, uResolution, lpTimeProc, dwUser, fuEvent);
 	LOQ_bool("system", "ip", "Delay", uDelay, "TimeProc", lpTimeProc);
 	return ret;
