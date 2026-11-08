@@ -506,14 +506,9 @@ HOOKDEF(ULONGLONG, WINAPI, GetTickCount64,
 	if (sleep_skip_active)
 		ret += (time_skipped.QuadPart / 10000);
 
-	{	/* SAGE DEBUG: trace tick compensation vs time_skipped per thread */
-		static int _sage_gtc_n = 0;
-		if (_sage_gtc_n < 120) { _sage_gtc_n++;
-			DebugOutput("SAGE_GTC64 tid=%u active=%d raw=%llu skip_ms=%lld ret=%llu\n",
-				GetCurrentThreadId(), sleep_skip_active, (unsigned long long)raw,
-				(long long)(time_skipped.QuadPart / 10000), (unsigned long long)ret);
-		}
-	}
+	/* SAGE DEBUG: log raw tick + current skip (ret auto-logged) into behavior log */
+	LOQ_nonzero("system", "pp", "raw", (PVOID)(ULONG_PTR)raw,
+		"skip_ms", (PVOID)(ULONG_PTR)(time_skipped.QuadPart / 10000));
 
 	return ret;
 }
@@ -675,7 +670,7 @@ HOOKDEF(DWORD, WINAPI, timeSetEvent,
 		GetCurrentThreadId(), sleep_skip_active, g_config.force_sleepskip,
 		uDelay, newDelay, (long long)(time_skipped.QuadPart / 10000));
 	DWORD ret = Old_timeSetEvent(newDelay, uResolution, lpTimeProc, dwUser, fuEvent);
-	LOQ_bool("system", "ip", "Delay", uDelay, "TimeProc", lpTimeProc);
+	LOQ_bool("system", "ipp", "Delay", uDelay, "TimeProc", lpTimeProc, "skip_ms", (PVOID)(ULONG_PTR)(time_skipped.QuadPart/10000));
 	return ret;
 }
 
