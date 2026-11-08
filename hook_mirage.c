@@ -1588,7 +1588,7 @@ return ret;
 
 		u.LowPart = lpSystemTimeAsFileTime->dwLowDateTime;
 		u.HighPart = lpSystemTimeAsFileTime->dwHighDateTime;
-		u.QuadPart += (ULONGLONG)time_skipped.QuadPart * 10000ull;
+		u.QuadPart += (ULONGLONG)time_skipped.QuadPart;  /* SAGE: time_skipped is 100ns FILETIME units (see GetTickCount /10000); match GetSystemTimeAsFileTime, no *10000 */
 		lpSystemTimeAsFileTime->dwLowDateTime = u.LowPart;
 		lpSystemTimeAsFileTime->dwHighDateTime = u.HighPart;
 
