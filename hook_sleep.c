@@ -638,6 +638,7 @@ HOOKDEF(void, WINAPI, GetSystemTimePreciseAsFileTime,
 	_Out_ LPFILETIME lpSystemTimeAsFileTime
 )
 {
+	int ret = 0;
 	DWORD low = 0;
 	DWORD high = 0;
 	lasterror_t lasterror;
