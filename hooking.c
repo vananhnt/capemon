@@ -353,7 +353,16 @@ int WINAPI enter_hook(hook_t *h, ULONG_PTR sp, ULONG_PTR ebp_or_rip)
 
 	if ((hookinfo->disable_count < 1) && (h->allow_hook_recursion || force_hook_thread_func(h->funcname) || (!__called_by_hook(sp, ebp_or_rip) /*&& !is_ignored_thread(GetCurrentThreadId())*/))) {
 
-		if (g_config.api_rate_cap && h->new_func != &New_RtlDispatchException && h->new_func != &New_NtContinue) {
+		// MIRAGE: never rate/count-cap the credit-bearing time hooks. These add the
+		// sleep-skipped interval back into the clock so a sample's clock-delta timing
+		// check still reads the full requested wait. If the cap disables them (returns
+		// the raw clock), the sample's own measurement reads come back uncredited and
+		// the evasion check fires -- exactly the galloro timer-cluster failure. A
+		// sample that spams these only pays the (cheap) hook overhead.
+		if (g_config.api_rate_cap && h->new_func != &New_RtlDispatchException && h->new_func != &New_NtContinue
+				&& h->new_func != &New_GetTickCount && h->new_func != &New_GetTickCount64
+				&& h->new_func != &New_NtQuerySystemTime && h->new_func != &New_timeGetTime
+				&& h->new_func != &New_NtQueryPerformanceCounter && h->new_func != &New_GetSystemTimeAsFileTime) {
 			if (h->hook_disabled)
 				return 0;
 			h->counter++;

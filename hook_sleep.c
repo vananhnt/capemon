@@ -594,12 +594,16 @@ HOOKDEF(ULONGLONG, WINAPI, GetTickCount64,
 	if (sleep_skip_active)
 		ret += (time_skipped.QuadPart / 10000);
 
-	// MIRAGE_PROBE: see GetTickCount above. tid lets us tell the main-thread read
-	// (line ~130 of the mm-timer sample) from the winmm callback-thread read.
+	// MIRAGE_PROBE: see GetTickCount above. caller = real (non-capemon) return
+	// address so we can tell whether the SAMPLE .exe's own measurement reads reach
+	// this hook; disabled flags whether the api-cap turned this hook off (would make
+	// it return raw to the caller). tid separates main vs winmm-callback threads.
 	if (time_skipped.QuadPart / 10000 >= 1000)
-		DebugOutput("MIRAGE_GTC64: raw=%llu credited=%llu skip_active=%d skipped_ms=%lld tid=%u\n",
+		DebugOutput("MIRAGE_GTC64: raw=%llu credited=%llu skip_active=%d skipped_ms=%lld tid=%u caller=0x%p disabled=%d\n",
 			(unsigned long long)raw_gettickcount64(), (unsigned long long)ret, sleep_skip_active,
-			(LONGLONG)(time_skipped.QuadPart / 10000), (unsigned int)GetCurrentThreadId());
+			(LONGLONG)(time_skipped.QuadPart / 10000), (unsigned int)GetCurrentThreadId(),
+			(PVOID)hook_info()->main_caller_retaddr,
+			hook_info()->current_hook ? hook_info()->current_hook->hook_disabled : -1);
 
 	return ret;
 }
