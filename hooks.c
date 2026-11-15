@@ -590,6 +590,12 @@ hook_t full_hooks[] = {
 	HOOK_SPECIAL(kernel32, GetSystemTimeAsFileTime),
 	HOOK_EMULATE(kernel32, GetTickCount),
 	HOOK_EMULATE(kernel32, GetTickCount64),
+	// GetTickCount64's real implementation lives in kernelbase.dll; kernel32 only
+	// forwards it, so a sample's IAT binds straight to kernelbase!GetTickCount64 and
+	// bypasses the kernel32 patch (proven by task 4677: New_GetTickCount64 never ran
+	// while the sample called it twice). Hook kernelbase directly so the sleep-skip
+	// time credit reaches clock-delta timing checks (galloro 092/163/169/076/190).
+	HOOK_EMULATE(kernelbase, GetTickCount64),
 	HOOK_SPECIAL(ntdll, NtQuerySystemTime),
 	HOOK(user32, GetLastInputInfo),
 	HOOK_SPECIAL(winmm, timeGetTime),
@@ -1500,6 +1506,12 @@ hook_t office_hooks[] = {
 	HOOK_SPECIAL(kernel32, GetSystemTimeAsFileTime),
 	HOOK_EMULATE(kernel32, GetTickCount),
 	HOOK_EMULATE(kernel32, GetTickCount64),
+	// GetTickCount64's real implementation lives in kernelbase.dll; kernel32 only
+	// forwards it, so a sample's IAT binds straight to kernelbase!GetTickCount64 and
+	// bypasses the kernel32 patch (proven by task 4677: New_GetTickCount64 never ran
+	// while the sample called it twice). Hook kernelbase directly so the sleep-skip
+	// time credit reaches clock-delta timing checks (galloro 092/163/169/076/190).
+	HOOK_EMULATE(kernelbase, GetTickCount64),
 	HOOK_SPECIAL(ntdll, NtQuerySystemTime),
 	HOOK(user32, GetLastInputInfo),
 	HOOK_SPECIAL(winmm, timeGetTime),
