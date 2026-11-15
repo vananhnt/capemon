@@ -570,6 +570,14 @@ HOOKDEF(DWORD, WINAPI, GetTickCount,
 	if (sleep_skip_active)
 		ret += (DWORD)(time_skipped.QuadPart / 10000);
 
+	// MIRAGE_PROBE: trace credit delivery for the timer/wait cluster. Only fires
+	// once a large credit is pending so it isolates the post-timeSetEvent reads
+	// (incl. the callback thread) without flooding the log. Remove after triage.
+	if (time_skipped.QuadPart / 10000 >= 1000)
+		DebugOutput("MIRAGE_GTC32: raw=%u credited=%u skip_active=%d skipped_ms=%lld tid=%u\n",
+			(unsigned int)raw_gettickcount(), (unsigned int)ret, sleep_skip_active,
+			(LONGLONG)(time_skipped.QuadPart / 10000), (unsigned int)GetCurrentThreadId());
+
 	return ret;
 }
 
@@ -585,6 +593,13 @@ HOOKDEF(ULONGLONG, WINAPI, GetTickCount64,
 	// add the time we've skipped
 	if (sleep_skip_active)
 		ret += (time_skipped.QuadPart / 10000);
+
+	// MIRAGE_PROBE: see GetTickCount above. tid lets us tell the main-thread read
+	// (line ~130 of the mm-timer sample) from the winmm callback-thread read.
+	if (time_skipped.QuadPart / 10000 >= 1000)
+		DebugOutput("MIRAGE_GTC64: raw=%llu credited=%llu skip_active=%d skipped_ms=%lld tid=%u\n",
+			(unsigned long long)raw_gettickcount64(), (unsigned long long)ret, sleep_skip_active,
+			(LONGLONG)(time_skipped.QuadPart / 10000), (unsigned int)GetCurrentThreadId());
 
 	return ret;
 }
@@ -665,6 +680,12 @@ HOOKDEF(DWORD, WINAPI, timeSetEvent,
 		time_skipped.QuadPart += (LONGLONG)(uDelay - realdelay) * 10000;
 		skipped = 1;
 	}
+
+	// MIRAGE_PROBE: confirm the credit landed and on which thread. Pairs with the
+	// MIRAGE_GTC64 probes so we can diff the credit site vs the callback read.
+	DebugOutput("MIRAGE_TSE: uDelay=%u realdelay=%u skip_active=%d skipped=%d skipped_ms=%lld tid=%u\n",
+		(unsigned int)uDelay, (unsigned int)realdelay, sleep_skip_active, skipped,
+		(LONGLONG)(time_skipped.QuadPart / 10000), (unsigned int)GetCurrentThreadId());
 
 	ret = Old_timeSetEvent(realdelay, uResolution, lpTimeProc, dwUser, fuEvent);
 	LOQ_bool("system", "ipis", "Delay", uDelay, "TimeProc", lpTimeProc, "RealDelay", realdelay,
