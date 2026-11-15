@@ -599,6 +599,7 @@ hook_t full_hooks[] = {
 	HOOK(user32, MsgWaitForMultipleObjectsEx),
 	HOOK(kernel32, CreateTimerQueueTimer),
 	HOOK(kernel32, SetThreadpoolTimer),
+	HOOK(kernel32, GetQueuedCompletionStatus),
 
 	// Socket Hooks
 	HOOK(ws2_32, WSAStartup),
@@ -1507,6 +1508,7 @@ hook_t office_hooks[] = {
 	HOOK(user32, MsgWaitForMultipleObjectsEx),
 	HOOK(kernel32, CreateTimerQueueTimer),
 	HOOK(kernel32, SetThreadpoolTimer),
+	HOOK(kernel32, GetQueuedCompletionStatus),
 
 	// Socket Hooks
 	HOOK(ws2_32, WSAStartup),

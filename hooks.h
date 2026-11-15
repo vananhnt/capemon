@@ -2763,6 +2763,14 @@ HOOKDEF(void, WINAPI, SetThreadpoolTimer,
   _In_		DWORD		msWindowLength
 );
 
+HOOKDEF(BOOL, WINAPI, GetQueuedCompletionStatus,
+  __in  HANDLE			CompletionPort,
+  __out LPDWORD			lpNumberOfBytesTransferred,
+  __out PULONG_PTR		lpCompletionKey,
+  __out LPOVERLAPPED	*lpOverlapped,
+  __in  DWORD			dwMilliseconds
+);
+
 //
 // Socket Hooks
 //
