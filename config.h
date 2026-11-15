@@ -332,4 +332,11 @@ extern struct _g_config g_config;
 
 void read_config(void);
 
+/* Timer/wait skip+credit helpers (defined in hook_sleep.c). Let other hook
+ * files (e.g. hook_mirage.c) participate in the sleep-skip time accounting so a
+ * clock-delta timing check reads the requested interval even though the real
+ * wait was shortened. */
+int mirage_sleep_skip_active(void);
+void mirage_credit_skipped_ms(unsigned int ms);
+
 #endif

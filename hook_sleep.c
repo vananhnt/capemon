@@ -54,6 +54,35 @@ void disable_sleep_skip()
 	}
 }
 
+/*
+ * Shared skip+credit helpers for timer/wait primitives that measure elapsed
+ * time with a clock delta (GetTickCount64/QPC before vs. after a timed wait).
+ * A sample that schedules a long timer/IOCP/queue wait and compares the
+ * measured delta against the requested interval cannot be defeated by simply
+ * returning the wait early -- that makes the delta too SMALL, which is itself
+ * the sandbox tell. Instead we shrink the real wait so analysis stays fast and
+ * credit `time_skipped` the requested interval, so every subsequent clock read
+ * (GetTickCount/GetTickCount64/QPC/NtQuerySystemTime) advances to match. These
+ * expose the file-local skip state to hook_mirage.c without leaking the static.
+ */
+
+// only reduce timer/wait intervals at or above this (ms); leave genuine short
+// timers untouched so we don't perturb normal program behaviour.
+#define MIRAGE_TIMER_SKIP_MIN_MS 1000
+// the small real interval we leave so a callback can actually fire (ms).
+#define MIRAGE_TIMER_REAL_MS 10
+
+int mirage_sleep_skip_active(void)
+{
+	return sleep_skip_active;
+}
+
+void mirage_credit_skipped_ms(unsigned int ms)
+{
+	if (sleep_skip_active)
+		time_skipped.QuadPart += (LONGLONG)ms * 10000;
+}
+
 HOOKDEF(NTSTATUS, WINAPI, NtWaitForSingleObject,
 	__in	HANDLE Handle,
 	__in	BOOLEAN Alertable,
@@ -619,8 +648,27 @@ HOOKDEF(DWORD, WINAPI, timeSetEvent,
    DWORD_PTR      dwUser,
    UINT           fuEvent
 ) {
-	DWORD ret = Old_timeSetEvent(uDelay, uResolution, lpTimeProc, dwUser, fuEvent);
-	LOQ_bool("system", "ip", "Delay", uDelay, "TimeProc", lpTimeProc);
+	DWORD ret;
+	UINT realdelay = uDelay;
+	int skipped = 0;
+
+	/*
+	 * Multimedia-timer stall check: the sample records a tick, schedules a
+	 * long one-shot timer, waits on the event the callback signals, then
+	 * compares the tick delta to uDelay. Fire the callback almost
+	 * immediately (so the event is signalled before the sample's wait, even
+	 * when that wait is itself sleep-skipped) and credit the requested delay
+	 * so the measured delta still reads ~uDelay.
+	 */
+	if (sleep_skip_active && uDelay >= MIRAGE_TIMER_SKIP_MIN_MS) {
+		realdelay = MIRAGE_TIMER_REAL_MS;
+		time_skipped.QuadPart += (LONGLONG)(uDelay - realdelay) * 10000;
+		skipped = 1;
+	}
+
+	ret = Old_timeSetEvent(realdelay, uResolution, lpTimeProc, dwUser, fuEvent);
+	LOQ_bool("system", "ipis", "Delay", uDelay, "TimeProc", lpTimeProc, "RealDelay", realdelay,
+		"Status", skipped ? "Skipped" : "Unmodified");
 	return ret;
 }
 
@@ -633,9 +681,64 @@ HOOKDEF(BOOL, WINAPI, CreateTimerQueueTimer,
   _In_		DWORD				Period,
   _In_		ULONG				Flags
 ) {
-	BOOL ret = Old_CreateTimerQueueTimer(phNewTimer, TimerQueue, Callback, Parameter, DueTime, Period, Flags);
+	BOOL ret;
+	DWORD realdue = DueTime;
+
+	/*
+	 * Timer-queue skew check: same shape as the multimedia-timer stall --
+	 * fire the one-shot callback promptly and credit the requested DueTime so
+	 * the sample's tick delta across the wait still reads ~DueTime. Only the
+	 * initial fire is shifted; a recurring Period is left untouched.
+	 */
+	if (sleep_skip_active && DueTime >= MIRAGE_TIMER_SKIP_MIN_MS) {
+		realdue = MIRAGE_TIMER_REAL_MS;
+		time_skipped.QuadPart += (LONGLONG)(DueTime - realdue) * 10000;
+	}
+
+	ret = Old_CreateTimerQueueTimer(phNewTimer, TimerQueue, Callback, Parameter, realdue, Period, Flags);
 	LOQ_bool("system", "Pphhiii", "phNewTimer", phNewTimer, "TimerQueue", TimerQueue, "Callback", Callback, "Parameter", Parameter, "DueTime", DueTime, "Period", Period, "Flags", Flags);
 	return ret;
+}
+
+HOOKDEF(void, WINAPI, SetThreadpoolTimer,
+  _Inout_	PVOID		pti,
+  _In_opt_	PFILETIME	pftDueTime,
+  _In_		DWORD		msPeriod,
+  _In_		DWORD		msWindowLength
+) {
+	FILETIME local;
+	PFILETIME due = pftDueTime;
+	unsigned long milli = 0;
+	DWORD ret = 0;
+
+	/*
+	 * Thread-pool timer skew check: the sample sets a relative-due TP timer
+	 * (negative FILETIME = 100ns from now), waits on the event its callback
+	 * signals, and compares the tick delta to the requested due time. Shorten
+	 * the real due time so the callback fires promptly (pre-signalling the
+	 * wait) and credit the sleep-skip clock the requested interval. A NULL
+	 * due time (cancel) or an absolute (positive) due time is passed through.
+	 */
+	if (sleep_skip_active && pftDueTime) {
+		LARGE_INTEGER li;
+		li.LowPart = pftDueTime->dwLowDateTime;
+		li.HighPart = pftDueTime->dwHighDateTime;
+		if (li.QuadPart < 0) {
+			unsigned __int64 ms = (unsigned __int64)(-li.QuadPart) / 10000;
+			if (ms >= MIRAGE_TIMER_SKIP_MIN_MS) {
+				LARGE_INTEGER red;
+				milli = (unsigned long)ms;
+				red.QuadPart = -((LONGLONG)MIRAGE_TIMER_REAL_MS * 10000);
+				local.dwLowDateTime = red.LowPart;
+				local.dwHighDateTime = red.HighPart;
+				due = &local;
+				time_skipped.QuadPart += (LONGLONG)(ms - MIRAGE_TIMER_REAL_MS) * 10000;
+			}
+		}
+	}
+
+	Old_SetThreadpoolTimer(pti, due, msPeriod, msWindowLength);
+	LOQ_void("system", "pis", "Timer", pti, "Milliseconds", milli, "Status", milli ? "Skipped" : "Unmodified");
 }
 
 static int lastinput_called;
