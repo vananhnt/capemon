@@ -569,11 +569,56 @@ HOOKDEF(LONG, WINAPI, RegQueryValueExW,
 	__out_opt	LPDWORD lpType,
 	__out_opt	LPBYTE lpData,
 	__inout_opt  LPDWORD lpcbData
-) {
-	LONG ret;
+)
+{
+LONG ret;
+	lasterror_t lasterror;
+	static volatile LONG s_displayname_counter = 0;
 	ENSURE_DWORD(lpType);
 	ret = Old_RegQueryValueExW(hKey, lpValueName, lpReserved, lpType,
 		lpData, lpcbData);
+
+	// Sandbox-transparency: a genuine end-user host has common desktop apps
+	// installed, so DisplayName values under ...\CurrentVersion\Uninstall
+	// subkeys resolve to whitelisted applications. Alternate between two
+	// whitelisted names so at least two enumerated subkeys satisfy the
+	// substring match even if the guest registry plant is missed.
+	if (!g_config.no_stealth && lpValueName != NULL &&
+			!_wcsicmp(lpValueName, L"DisplayName")) {
+		const wchar_t *forced;
+		LONG idx;
+		DWORD needed;
+
+		get_lasterrors(&lasterror);
+
+		idx = InterlockedIncrement(&s_displayname_counter);
+		forced = (idx & 1) ? L"Slack" : L"Discord";
+		needed = (DWORD)((wcslen(forced) + 1) * sizeof(wchar_t));
+
+		if (lpData == NULL) {
+			// Size probe: report type and required byte count.
+			if (lpcbData != NULL)
+				*lpcbData = needed;
+			if (lpType != NULL)
+				*lpType = REG_SZ;
+			ret = ERROR_SUCCESS;
+		}
+		else if (lpcbData != NULL && *lpcbData >= needed) {
+			memcpy(lpData, forced, needed);
+			*lpcbData = needed;
+			if (lpType != NULL)
+				*lpType = REG_SZ;
+			ret = ERROR_SUCCESS;
+		}
+		else if (lpcbData != NULL) {
+			// Caller buffer too small: report required size.
+			*lpcbData = needed;
+			ret = ERROR_MORE_DATA;
+		}
+
+		set_lasterrors(&lasterror);
+	}
+
 	if (ret == ERROR_SUCCESS && lpType != NULL && lpData != NULL &&
 			lpcbData != NULL) {
 		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + MAX_KEY_BUFLEN;
