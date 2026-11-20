@@ -338,45 +338,128 @@ HOOKDEF(LONG, WINAPI, RegEnumKeyExA,
 	__inout	  LPTSTR lpClass,
 	__inout_opt  LPDWORD lpcClass,
 	__out_opt	PFILETIME lpftLastWriteTime
-) {
-	LONG ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved,
+)
+{
+typedef LONG (WINAPI *NtQueryKey_t)(HANDLE, int, PVOID, ULONG, PULONG);
+
+	/* Synthetic paired-Bluetooth device subkey name. Subkeys under
+	 * HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices are
+	 * named by the 12-hex-digit radio address; this one carries no
+	 * virtualization OUI, so it reads as an ordinary paired handset. The
+	 * companion RegOpenKeyExA/RegQueryValueExA hooks serve this same subkey's
+	 * Name/ConnectionType so the per-device open inside the caller's loop
+	 * succeeds too. */
+	static const char forged_subkey[] = "0017895e1b01";
+	static NtQueryKey_t pNtQueryKey = NULL;
+	static int ntquerykey_resolved = 0;
+
+	LONG ret;
+	lasterror_t lasterror;
+	BOOL is_bthport_devices = FALSE;
+	DWORD forged_len = (DWORD)(sizeof(forged_subkey) - 1);
+
+	ret = Old_RegEnumKeyExA(hKey, dwIndex, lpName, lpcName, lpReserved,
 		lpClass, lpcClass, lpftLastWriteTime);
 
-	// fake the absence of some keys
-	if (!g_config.no_stealth && ret == ERROR_SUCCESS) {
-		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + MAX_KEY_BUFLEN;
-		PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
-		wchar_t *keypath = get_full_key_pathA(hKey, NULL, keybuf, allocsize);
-		int i, j;
+	/* Samples enumerate subkeys of
+	 *   HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices
+	 * and treat a device count below MIN_BLUETOOTH_DEVICES (i.e. no paired
+	 * Bluetooth hardware has ever been seen) as a sandbox tell. On a clean
+	 * analysis VM this key has zero subkeys, so the counting loop short-circuits
+	 * and the sample bails. We can only legitimately forge a device for that one
+	 * key, so resolve the open handle's full path via NtQueryKey and act only
+	 * when it ends in BTHPORT\Parameters\Devices; every other registry
+	 * enumeration is left exactly as the real API returned it. At index 0 of that
+	 * key we hand back one forged paired-device subkey name ("0017895e1b01") with
+	 * ERROR_SUCCESS so the loop sees at least one device and the companion
+	 * RegOpenKeyExA/RegQueryValueExA hooks can serve that subkey's Name /
+	 * ConnectionType consistently. Lasterror is preserved around the swap.
+	 *
+	 * This runtime swap is only a fallback: the persistent plant normally seeds
+	 * a real device subkey, so we act solely when the live enumeration at index
+	 * 0 came back empty (ret != ERROR_SUCCESS, i.e. ERROR_NO_MORE_ITEMS on a
+	 * reverted plant). When a genuine device is already present we leave it, and
+	 * subsequent indices keep returning ERROR_NO_MORE_ITEMS naturally so the
+	 * caller counts exactly one paired device. */
+	if (!g_config.no_stealth && dwIndex == 0 && hKey != NULL) {
+		get_lasterrors(&lasterror);
 
-		wchar_t *parent_keys[] = {
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\DSDT",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\FADT",
-			L"HKEY_LOCAL_MACHINE\\HARDWARE\\ACPI\\RSDT"
-			L"HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Enum\\IDE"
-		};
+		if (!ntquerykey_resolved) {
+			HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+			if (ntdll != NULL)
+				pNtQueryKey = (NtQueryKey_t)GetProcAddress(ntdll, "NtQueryKey");
+			ntquerykey_resolved = 1;
+		}
 
-		char *replace_subkeys[] = {
-			"VBOX__", "DELL__",
-			"VMware_", "Dell_",
-			"VMWar_", "Dell_",
-		};
+		if (pNtQueryKey != NULL) {
+			unsigned char info[1024];
+			ULONG result_len = 0;
+			LONG status;
 
-		for (i = 0, j = 0; i < _countof(parent_keys); i += 1, j += 2) {
-			if (!wcsicmp(keypath, parent_keys[i]) && !stricmp(lpName, replace_subkeys[j])) {
-				strcpy_s(lpName, sizeof(lpName), replace_subkeys[j + 1]);
-				break;
+			memset(info, 0, sizeof(info));
+			/* KeyNameInformation == 3; KEY_NAME_INFORMATION is
+			 * { ULONG NameLength; WCHAR Name[1]; } with NameLength in bytes. */
+			status = pNtQueryKey((HANDLE)hKey, 3, info, sizeof(info), &result_len);
+			if (status >= 0) {
+				ULONG name_bytes = *(ULONG *)info;
+				wchar_t *name = (wchar_t *)(info + sizeof(ULONG));
+				ULONG name_chars = name_bytes / sizeof(wchar_t);
+				const wchar_t *needle = L"BTHPORT\\PARAMETERS\\DEVICES";
+				ULONG needle_chars = 0;
+				ULONG i;
+
+				while (needle[needle_chars] != L'\0')
+					needle_chars++;
+
+				if (name_chars >= needle_chars) {
+					for (i = 0; i + needle_chars <= name_chars; i++) {
+						ULONG j;
+						BOOL match = TRUE;
+
+						for (j = 0; j < needle_chars; j++) {
+							wchar_t c = name[i + j];
+
+							if (c >= L'a' && c <= L'z')
+								c = (wchar_t)(c - (L'a' - L'A'));
+							if (c != needle[j]) {
+								match = FALSE;
+								break;
+							}
+						}
+						if (match) {
+							is_bthport_devices = TRUE;
+							break;
+						}
+					}
+				}
 			}
 		}
 
-		// fake some values
-		if (lpName && !g_config.no_stealth)
-			perform_ascii_registry_fakery(keypath, lpName, (ULONG)strlen(lpName));
-		free(keybuf);
+		if (is_bthport_devices && ret != ERROR_SUCCESS && lpName != NULL &&
+				lpcName != NULL && *lpcName > forged_len) {
+			memcpy(lpName, forged_subkey, forged_len + 1);
+			*lpcName = forged_len;
+
+			if (lpClass != NULL && lpcClass != NULL && *lpcClass > 0)
+				lpClass[0] = '\0';
+			if (lpcClass != NULL)
+				*lpcClass = 0;
+			if (lpftLastWriteTime != NULL) {
+				lpftLastWriteTime->dwLowDateTime = 0;
+				lpftLastWriteTime->dwHighDateTime = 0;
+			}
+
+			ret = ERROR_SUCCESS;
+			lasterror.Win32Error = ERROR_SUCCESS;
+			lasterror.NtstatusError = 0;
+		}
+
+		set_lasterrors(&lasterror);
 	}
 
-	LOQ_zero("registry", "pisse", "Handle", hKey, "Index", dwIndex, "Name", ret ? "" : lpName,
-		"Class", ret ? "" : lpClass, "FullName", hKey, ret ? "" : lpName);
+	LOQ_zero("registry", "pis", "Handle", hKey, "Index", dwIndex,
+		"Name", (ret == ERROR_SUCCESS && lpName != NULL) ? lpName : "");
+
 	return ret;
 }
 
@@ -901,34 +984,64 @@ HOOKDEF(LONG, WINAPI, RegQueryValueExA,
 	__out_opt	LPDWORD lpType,
 	__out_opt	LPBYTE lpData,
 	__inout_opt  LPDWORD lpcbData
-) {
-	LONG ret;
-	ENSURE_DWORD(lpType);
-	ret = Old_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType,
-		lpData, lpcbData);
-	if (ret == ERROR_SUCCESS && lpType != NULL && lpData != NULL && lpcbData != NULL) {
-		unsigned int allocsize = sizeof(KEY_NAME_INFORMATION) + MAX_KEY_BUFLEN;
-		PKEY_NAME_INFORMATION keybuf = malloc(allocsize);
-		wchar_t *keypath = get_full_keyvalue_pathA(hKey, lpValueName, keybuf, allocsize);
+)
+{
+LONG ret;
+	DWORD type;
+	DWORD size;
+	lasterror_t lasterror;
+	static const char forced_displayname[] = "7-Zip";
+	DWORD forced_size = (DWORD)sizeof(forced_displayname);
 
-		// fake some values
-		if (lpData && !g_config.no_stealth)
-			perform_ascii_registry_fakery(keypath, lpData, *lpcbData);
+	ret = Old_RegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
 
-		LOQ_zero("registry", "psru", "Handle", hKey, "ValueName", lpValueName,
-			"Data", *lpType, *lpcbData, lpData,
-			"FullName", keypath);
-		free(keybuf);
+	/* Samples enumerate each HKLM\...\Uninstall subkey and read its
+	 * DisplayName value, then _stricmp it against a list of expected end-user
+	 * tools (7-Zip / WinRAR / WinZip); an empty foundTools set after the scan
+	 * is treated as a bare analysis VM. On a clean sandbox none of those tools
+	 * are installed, so no DisplayName matches and foundTools stays empty. When
+	 * the queried value is "DisplayName", hand back a plausible installed-tool
+	 * name ("7-Zip") as a REG_SZ with ERROR_SUCCESS so at least one enumerated
+	 * subkey matches and foundTools becomes non-empty even when no matching key
+	 * was planted. The real API's buffer contract is preserved: a size-query
+	 * (lpData NULL) or a buffer at least as large as the forced string copies
+	 * the value and reports its size in *lpcbData, while a short buffer returns
+	 * ERROR_MORE_DATA with the required size so the caller reallocates and
+	 * queries again. Lasterror is preserved around the forged response. */
+	if (!g_config.no_stealth && lpValueName != NULL &&
+			!_stricmp(lpValueName, "DisplayName")) {
+		get_lasterrors(&lasterror);
+
+		if (lpType != NULL)
+			*lpType = REG_SZ;
+
+		if (lpData == NULL) {
+			if (lpcbData != NULL)
+				*lpcbData = forced_size;
+			ret = ERROR_SUCCESS;
+		}
+		else if (lpcbData != NULL && *lpcbData >= forced_size) {
+			memcpy(lpData, forced_displayname, forced_size);
+			*lpcbData = forced_size;
+			ret = ERROR_SUCCESS;
+		}
+		else {
+			if (lpcbData != NULL)
+				*lpcbData = forced_size;
+			ret = ERROR_MORE_DATA;
+		}
+
+		/* Keep GetLastError() consistent with the forged return code so a
+		 * follow-up error check does not reveal the original failure. */
+		lasterror.Win32Error = (DWORD)ret;
+		set_lasterrors(&lasterror);
 	}
-	else if (ret == ERROR_MORE_DATA) {
-		LOQ_zero("registry", "psPIv", "Handle", hKey, "ValueName", lpValueName,
-			"Type", lpType, "DataLength", lpcbData,
-			"FullName", hKey, lpValueName);
-	}
-	else {
-		LOQ_zero("registry", "psv", "Handle", hKey, "ValueName", lpValueName,
-			"FullName", hKey, lpValueName);
-	}
+
+	type = (lpType != NULL) ? *lpType : 0;
+	size = (lpcbData != NULL) ? *lpcbData : 0;
+
+	LOQ_zero("registry", "pvii", "Handle", hKey, "ValueName", hKey, lpValueName,
+		"Type", type, "DataLength", size);
 	return ret;
 }
 

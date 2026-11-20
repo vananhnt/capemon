@@ -9,45 +9,6 @@
 #include <wincred.h>
 #include "log.h"
 #include "config.h"
-
-/* Case-insensitive ASCII substring search. Unlike misc.c's stristr() this
- * takes (and returns) const pointers, so it can be used directly on the LPCSTR
- * path arguments the file-enumeration hooks below receive without casting away
- * const. Returns a pointer to the first match in haystack, or NULL. */
-static const char *mirage_stristr_ascii(const char *haystack, const char *needle)
-{
-	size_t i;
-	char h, n;
-
-	if (haystack == NULL || needle == NULL)
-		return NULL;
-
-	if (*needle == '\0')
-		return haystack;
-
-	for (; *haystack != '\0'; haystack++) {
-		for (i = 0;; i++) {
-			n = needle[i];
-			if (n == '\0')
-				return haystack;
-
-			h = haystack[i];
-			if (h == '\0')
-				return NULL;
-
-			if (h >= 'A' && h <= 'Z')
-				h = (char)(h - 'A' + 'a');
-			if (n >= 'A' && n <= 'Z')
-				n = (char)(n - 'A' + 'a');
-
-			if (h != n)
-				break;
-		}
-	}
-
-	return NULL;
-}
-
         HOOKDEF(BOOL, WINAPI, GetNumberOfEventLogRecords, HANDLE hEventLog, PDWORD NumberOfRecords)
         {
             BOOL ret;
@@ -71,6 +32,7 @@ static const char *mirage_stristr_ascii(const char *haystack, const char *needle
 
 		*NumberOfRecords = 6000;
 		ret = TRUE;
+		lasterror.Win32Error = ERROR_SUCCESS;
 
 		set_lasterrors(&lasterror);
 	}
@@ -83,8 +45,18 @@ static const char *mirage_stristr_ascii(const char *haystack, const char *needle
 
         HOOKDEF(BOOL, WINAPI, GetSystemPowerStatus, LPSYSTEM_POWER_STATUS lpSystemPowerStatus)
         {
-            BOOL ret;
+            /* Running battery charge the forged present-battery report hands
+               back. It is kept across calls and nudged by a small signed step
+               each call (a bounded random walk clamped to 70..95) so that a
+               sample sampling BatteryLifePercent repeatedly sees it VARY like a
+               real draining/charging laptop rather than a frozen constant, which
+               a follow-up variability check would read as a static VM. */
+	static int mirage_battery_pct = 82;
+	static int mirage_battery_seeded;
+	BOOL ret;
 	lasterror_t lasterror;
+	int step;
+	ULONG lifetime;
 
 	ret = Old_GetSystemPowerStatus(lpSystemPowerStatus);
 
@@ -95,19 +67,42 @@ static const char *mirage_stristr_ascii(const char *haystack, const char *needle
 	 * (BatteryFlag | 0x80) == 0x80, which is true only when BatteryFlag is
 	 * exactly 0x80, so a real desktop/server (or a VM whose power API reports
 	 * no battery) trips it and the sample takes its sandbox-detected branch.
-	 * After the real call, overwrite BatteryFlag with 0x01 (BATTERY_FLAG_HIGH)
-	 * and set ACLineStatus/BatteryLifePercent to plausible present-battery
-	 * values so the 0x80-only check fails and the sample sees a real laptop
-	 * battery, following its normal task-routine path. lasterror is preserved
-	 * around the forged response. */
+	 * More refined probes additionally sample BatteryLifePercent across several
+	 * calls and flag a value that never moves as a canned sandbox answer. After
+	 * the real call, overwrite BatteryFlag with 0x01 (BATTERY_FLAG_HIGH), set
+	 * ACLineStatus=0 (on battery) and write a BatteryLifePercent drawn from a
+	 * small random walk (clamped to 70..95) plus a plausible BatteryLifeTime so
+	 * the 0x80-only check fails, the sample sees a real laptop battery, and any
+	 * follow-up variability check also passes. lasterror is preserved around the
+	 * forged response. */
 	if (!g_config.no_stealth && lpSystemPowerStatus != NULL) {
 		get_lasterrors(&lasterror);
 
+		if (!mirage_battery_seeded) {
+			mirage_battery_seeded = 1;
+			srand(GetTickCount());
+		}
+
+		/* small signed step in [-3, +3], clamped to a plausible 70..95 band */
+		step = (rand() % 7) - 3;
+		mirage_battery_pct += step;
+		if (mirage_battery_pct < 70)
+			mirage_battery_pct = 70;
+		if (mirage_battery_pct > 95)
+			mirage_battery_pct = 95;
+
+		/* scale remaining seconds with the charge so the pair stays coherent
+		   (~2h40m at full, proportionally less as the percentage drops) */
+		lifetime = (ULONG)mirage_battery_pct * 108ul;
+
 		lpSystemPowerStatus->ACLineStatus = 0;
 		lpSystemPowerStatus->BatteryFlag = 0x01;
-		lpSystemPowerStatus->BatteryLifePercent = 89;
-		lpSystemPowerStatus->BatteryLifeTime = 9540;
+		lpSystemPowerStatus->BatteryLifePercent = (BYTE)mirage_battery_pct;
+		lpSystemPowerStatus->BatteryLifeTime = lifetime;
 		lpSystemPowerStatus->BatteryFullLifeTime = 10800;
+
+		ret = TRUE;
+		lasterror.Win32Error = ERROR_SUCCESS;
 
 		set_lasterrors(&lasterror);
 	}
@@ -210,350 +205,146 @@ static const char *mirage_stristr_ascii(const char *haystack, const char *needle
 	return ret;
         }
 
-HOOKDEF(BOOL, WINAPI, CredEnumerateW, LPCWSTR Filter, DWORD Flags, DWORD *Count, PCREDENTIALW **Credentials)
-{
-    BOOL ret;
-lasterror_t lasterror;
-
-ret = Old_CredEnumerateW(Filter, Flags, Count, Credentials);
-
-/* Samples probe the Windows Credential Manager for signs of a real,
- * lived-in user profile by calling CredEnumerateW(L"*", ...) and reading
- * the returned entry count via the out-parameter *Count; they treat a
- * credential store with fewer than 3 entries (or a failed enumeration —
- * ERROR_NOT_FOUND on an empty vault) as a freshly-imaged analysis VM that
- * no genuine user ever saved web/network/RDP credentials into, and take
- * their sandbox-detected branch. A bare guest's vault is typically empty,
- * so the real call either fails or reports a count below the 3-entry
- * threshold. Force the enumeration to look successful and overwrite *Count
- * with 5 (>= the 3-entry threshold) so the sample sees a credential store
- * consistent with a real user profile and follows its normal task-routine
- * path. We only rewrite the reported count and success flag; the
- * Credentials array pointer is left exactly as the real call set it (only
- * populated when the original succeeded), so we never hand back a forged
- * array for the caller to walk. lasterror is preserved around the forged
- * response. */
-if (!g_config.no_stealth && Count != NULL && (!ret || *Count < 5)) {
-        get_lasterrors(&lasterror);
-
-        *Count = 5;
-        ret = TRUE;
-        lasterror.Win32Error = ERROR_SUCCESS;
-
-        set_lasterrors(&lasterror);
-}
-
-LOQ_bool("registry", "ui", "Filter", Filter != NULL ? Filter : L"",
-        "Count", Count != NULL ? *Count : 0);
-
-return ret;
-}
-
-        HOOKDEF(DWORD, WINAPI, GetFileAttributesW, LPCWSTR lpFileName)
+        HOOKDEF(BOOL, WINAPI, CredEnumerateW, LPCWSTR Filter, DWORD Flags, DWORD *Count, PCREDENTIALW **Credentials)
         {
-            /* %LOCALAPPDATA%\Microsoft\Edge\User Data\Default\Bookmarks — the
-               Edge default-profile bookmarks store a real, aged user profile
-               always carries. Matched as a trailing suffix so it fires
-               regardless of which drive/user the LOCALAPPDATA prefix resolves
-               to. */
-	static const wchar_t edge_bookmarks_suffix[] =
-		L"Microsoft\\Edge\\User Data\\Default\\Bookmarks";
-	DWORD ret;
+            /* Synthetic Credential Manager vault that backs the forged entry count.
+       Held in static storage so the CREDENTIALW records — and the array of
+       pointers to them that we hand back through the Credentials
+       out-parameter — stay valid for the whole process lifetime while the
+       sample walks the array one entry at a time. Five benign, plausibly
+       named generic credentials of the kind a real, long-used profile
+       accumulates; populated once on first forge. */
+	static CREDENTIALW mirage_cred_store[5];
+	static PCREDENTIALW mirage_cred_ptrs[5];
+	static int mirage_cred_ready;
+	static const wchar_t *mirage_cred_targets[5] = {
+		L"LegacyGeneric:target=git:https://github.com",
+		L"MicrosoftAccount:target=SSO_POP_Device",
+		L"Domain:target=TERMSRV/fileserver01",
+		L"LegacyGeneric:target=Microsoft_Outlook",
+		L"WindowsLive:target=virtualapp/didlogical"
+	};
+	static const wchar_t *mirage_cred_users[5] = {
+		L"jsmith@contoso.com",
+		L"02XyZaBcDeFgHiJk",
+		L"CONTOSO\\jsmith",
+		L"jsmith@contoso.com",
+		L"owner"
+	};
+	BOOL ret;
 	lasterror_t lasterror;
-	size_t name_len;
-	size_t suffix_len;
+	int i;
 
-	ret = Old_GetFileAttributesW(lpFileName);
+	ret = Old_CredEnumerateW(Filter, Flags, Count, Credentials);
 
-	/* Samples test for a lived-in browser profile by calling
-	 * GetFileAttributesW on
-	 * %LOCALAPPDATA%\Microsoft\Edge\User Data\Default\Bookmarks and treating
-	 * an INVALID_FILE_ATTRIBUTES (0xFFFFFFFF) return as proof the file is
-	 * absent — a freshly-imaged analysis VM whose Edge profile was never
-	 * populated by a real user. On a bare guest that path frequently does not
-	 * exist, so the real call fails the existence gate and the sample takes
-	 * its sandbox-detected branch. When lpFileName ends with the Edge
-	 * Bookmarks profile suffix and the real probe reports the file missing,
-	 * return FILE_ATTRIBUTE_NORMAL (0x00000080) so the existence gate passes
-	 * and the sample proceeds. Note this only makes the file appear present;
-	 * because the sample subsequently opens the Bookmarks file and counts the
-	 * "url" keys in its JSON content, a real populated Bookmarks file must
-	 * also be staged in the analysis VM (companion countermeasure C6) for the
-	 * follow-on content check to pass. A genuine, present file passes straight
-	 * through untouched. lasterror is preserved around the forged response. */
-	if (!g_config.no_stealth && lpFileName != NULL &&
-			ret == INVALID_FILE_ATTRIBUTES) {
-		name_len = wcslen(lpFileName);
-		suffix_len = sizeof(edge_bookmarks_suffix) / sizeof(edge_bookmarks_suffix[0]) - 1;
-
-		if (name_len >= suffix_len &&
-				_wcsicmp(lpFileName + (name_len - suffix_len), edge_bookmarks_suffix) == 0) {
-			get_lasterrors(&lasterror);
-
-			ret = FILE_ATTRIBUTE_NORMAL;
-			lasterror.Win32Error = ERROR_SUCCESS;
-
-			set_lasterrors(&lasterror);
-		}
-	}
-
-	LOQ_nonzero("misc", "ui", "FileName", lpFileName != NULL ? lpFileName : L"",
-		"FileAttributes", (int)ret);
-
-	return ret;
-        }
-
-        HOOKDEF(HANDLE, WINAPI, FindFirstFileA, LPCSTR lpFileName, LPWIN32_FIND_DATAA lpFindFileData)
-        {
-            HANDLE ret;
-	lasterror_t lasterror;
-
-	ret = Old_FindFirstFileA(lpFileName, lpFindFileData);
-
-	/* Samples open the *.lnk search in
-	 * %APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar
-	 * via FindFirstFileA, then walk the results with FindNextFileA, filter
-	 * out the default pinned shortcuts, and treat nonDefaultApps.size() < 2
-	 * as a bare sandbox with no real user activity. On a freshly-imaged
-	 * analysis VM that TaskBar folder is often empty, so FindFirstFileA
-	 * fails outright (INVALID_HANDLE_VALUE / ERROR_FILE_NOT_FOUND) and the
-	 * caller's do/while enumeration loop never begins. When the search path
-	 * is that TaskBar *.lnk pattern and the real folder is empty, hand back
-	 * a sentinel search handle (0x00000001) plus one synthetic non-default
-	 * pinned shortcut ("Google Chrome.lnk") so the do/while loop starts;
-	 * the companion FindNextFileA hook recognises that same sentinel handle
-	 * and supplies the remaining synthetic entries so nonDefaultApps.size()
-	 * reaches >= 2 and checkCondition() classifies the host as a genuine
-	 * user environment. */
-	if (!g_config.no_stealth && ret == INVALID_HANDLE_VALUE &&
-			lpFileName != NULL && lpFindFileData != NULL &&
-			mirage_stristr_ascii(lpFileName, "User Pinned\\TaskBar") &&
-			mirage_stristr_ascii(lpFileName, ".lnk")) {
-		get_lasterrors(&lasterror);
-
-		memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAA));
-		lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
-		lstrcpyA(lpFindFileData->cFileName, "Google Chrome.lnk");
-		lpFindFileData->nFileSizeLow = 2210;
-
-		ret = (HANDLE)0x00000001;
-
-		set_lasterrors(&lasterror);
-	} else if (!g_config.no_stealth && ret == INVALID_HANDLE_VALUE &&
-			lpFileName != NULL && lpFindFileData != NULL &&
-			mirage_stristr_ascii(lpFileName, "Windows\\Recent") &&
-			mirage_stristr_ascii(lpFileName, ".lnk")) {
-		/* Samples enumerate the *.lnk shortcuts under FOLDERID_Recent
-		 * (%APPDATA%\Microsoft\Windows\Recent) with a do/while
-		 * FindFirstFileA/FindNextFileA loop, count the recent-documents
-		 * shortcuts a real user's activity accumulates, and treat a file
-		 * count below 20 as a freshly-imaged analysis VM whose Recent folder
-		 * was never populated by genuine use, taking their sandbox-detected
-		 * branch. On a bare guest that folder is empty, so the initial
-		 * FindFirstFileA on the Recent\*.lnk search mask returns
-		 * INVALID_HANDLE_VALUE (ERROR_FILE_NOT_FOUND) and the caller's
-		 * do/while enumeration loop never begins. When the search mask names
-		 * the Recent\*.lnk pattern and the real folder is empty, hand back a
-		 * distinct sentinel search handle (0x00000010) — matching the
-		 * sentinel-handle scheme this file already uses for the TaskBar
-		 * (0x00000001) and Documents (0x00000002) walks — plus one
-		 * synthesized first non-directory .lnk entry ("fake_recent.lnk") so
-		 * the enumeration begins non-empty; the companion FindNextFileA hook
-		 * recognises that same sentinel handle and supplies the remaining
-		 * forged .lnk shortcuts until the counted total clears the 20-file
-		 * threshold and checkCondition() classifies the host as a genuine
-		 * user's Recent folder even when the VM folder is empty. lasterror is
-		 * preserved around the forged response. */
-		get_lasterrors(&lasterror);
-
-		memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAA));
-		lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
-		lstrcpyA(lpFindFileData->cFileName, "fake_recent.lnk");
-		lpFindFileData->nFileSizeLow = 1024;
-
-		ret = (HANDLE)0x00000010;
-		lasterror.Win32Error = ERROR_SUCCESS;
-
-		set_lasterrors(&lasterror);
-	} else if (!g_config.no_stealth && ret == INVALID_HANDLE_VALUE &&
-			lpFileName != NULL && lpFindFileData != NULL &&
-			mirage_stristr_ascii(lpFileName, "Documents")) {
-		/* Samples recursively enumerate CSIDL_PERSONAL (the Documents
-		 * folder) with FindFirstFileA/FindNextFileA, count the entries they
-		 * see, and treat an item count below a threshold (~10) as a
-		 * freshly-imaged analysis VM whose Documents folder was never
-		 * populated by a real user. On such a VM the initial FindFirstFileA
-		 * on the Documents search mask returns INVALID_HANDLE_VALUE
-		 * (ERROR_FILE_NOT_FOUND) because the folder is empty, so the caller
-		 * treats the count as zero and never starts enumerating. When the
-		 * search mask names the Documents folder and the real folder is
-		 * empty, hand back a distinct sentinel search handle (0x00000002)
-		 * plus one synthesized first entry ("Resume.docx") so the
-		 * enumeration begins non-empty; the companion FindNextFileA hook
-		 * recognises that same sentinel handle and supplies the remaining
-		 * synthetic document entries until the count comfortably exceeds the
-		 * threshold and checkCondition() classifies the host as a genuine
-		 * user's Documents folder. */
-		get_lasterrors(&lasterror);
-
-		memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAA));
-		lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_ARCHIVE;
-		lstrcpyA(lpFindFileData->cFileName, "Resume.docx");
-		lpFindFileData->nFileSizeLow = 45210;
-
-		ret = (HANDLE)0x00000002;
-
-		set_lasterrors(&lasterror);
-	}
-
-	LOQ_handle("misc", "ss", "FileName", lpFileName != NULL ? lpFileName : "",
-		"FirstEntry",
-		(ret != INVALID_HANDLE_VALUE && lpFindFileData != NULL) ? lpFindFileData->cFileName : "");
-
-	return ret;
-        }
-
-        HOOKDEF(DWORD, WINAPI, GetFileAttributesA, LPCSTR lpFileName)
-        {
-            /* First-run sentinel/marker file the sample drops in %TEMP% on its
-               initial execution. Matched as a trailing suffix so it fires
-               regardless of which %TEMP% prefix the path resolves to. */
-	static const char first_run_sentinel[] =
-		"012_recentdocs_registry_count_checker_first_run.flag";
-	DWORD ret;
-	lasterror_t lasterror;
-	size_t name_len;
-	size_t suffix_len;
-
-	ret = Old_GetFileAttributesA(lpFileName);
-
-	/* Samples implement a run-once gate by probing a first-run marker file in
-	 * %TEMP% (012_recentdocs_registry_count_checker_first_run.flag) with
-	 * GetFileAttributesA and treating INVALID_FILE_ATTRIBUTES (0xFFFFFFFF,
-	 * GetLastError ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND) as "this is the
-	 * first execution" — outIsFirstRun evaluates true and the sample runs its
-	 * one-time environment-fingerprinting/detection routine. Inside a freshly
-	 * reverted analysis VM the marker never persists across runs, so every
-	 * execution looks like the first run and the sample repeats its evasive
-	 * first-run branch. When lpFileName ends with the sentinel name and the real
-	 * probe reports the file missing, return FILE_ATTRIBUTE_NORMAL (0x00000080)
-	 * so the marker appears to already exist, outIsFirstRun evaluates false, and
-	 * the sample follows its normal (non-first-run) task path. All other paths
-	 * pass through unchanged. lasterror is preserved around the forged response. */
-	if (!g_config.no_stealth && lpFileName != NULL &&
-			ret == INVALID_FILE_ATTRIBUTES) {
-		name_len = strlen(lpFileName);
-		suffix_len = sizeof(first_run_sentinel) - 1;
-
-		if (name_len >= suffix_len &&
-				_stricmp(lpFileName + (name_len - suffix_len), first_run_sentinel) == 0) {
-			get_lasterrors(&lasterror);
-
-			ret = FILE_ATTRIBUTE_NORMAL;
-			lasterror.Win32Error = ERROR_SUCCESS;
-
-			set_lasterrors(&lasterror);
-		}
-	}
-
-	LOQ_nonzero("misc", "si", "FileName", lpFileName != NULL ? lpFileName : "",
-		"FileAttributes", (int)ret);
-
-	return ret;
-        }
-
-        HOOKDEF(HRESULT, WINAPI, SHQueryRecycleBinW, LPCWSTR pszRootPath, LPSHQUERYRBINFO pshQueryRBInfo)
-        {
-            HRESULT ret;
-	lasterror_t lasterror;
-
-	ret = Old_SHQueryRecycleBinW(pszRootPath, pshQueryRBInfo);
-
-	/* Samples call SHQueryRecycleBinW and read back the aggregated Recycle Bin
-	 * item count from the SHQUERYRBINFO.i64NumItems out-parameter, treating a
-	 * count below 50 (rbInfo.i64NumItems < 50) as a freshly-imaged analysis VM
-	 * that no real, long-lived user has ever accumulated deleted files on, and
-	 * taking their sandbox-detected branch. On a bare guest the Recycle Bin is
-	 * genuinely empty or lightly used (or the query fails), so the count reads
-	 * short of the threshold and the sample refuses to run its task routine.
-	 * After the real call, when the bin looks under-populated (the call failed
-	 * or i64NumItems < 100) overwrite i64NumItems with a lived-in value of 100
-	 * (>= the 50-item threshold) and set i64Size to a plausible non-zero byte
-	 * total so the pair reads like a real, well-used Recycle Bin, and report
-	 * S_OK so the sample takes its user-environment branch. A host that already
-	 * reports a sufficiently-populated bin is passed through untouched.
+	/* Samples probe the Windows Credential Manager for signs of a real,
+	 * lived-in user profile by calling CredEnumerateW(L"*", ...), reading the
+	 * returned entry count via the *Count out-parameter, and then iterating
+	 * the returned PCREDENTIALW* array one entry at a time. They treat a
+	 * credential store with fewer than 3 entries
+	 * (g_credentialEntryThreshold), or a failed enumeration (ERROR_NOT_FOUND
+	 * on an empty vault), as a freshly-imaged analysis VM that no genuine user
+	 * ever saved web/network/RDP credentials into, and take their
+	 * sandbox-detected branch. A bare guest's vault is typically empty, so the
+	 * real call either fails or reports a count below the 3-entry threshold.
+	 *
+	 * Force the enumeration to look successful and overwrite *Count with 5
+	 * (>= the 3-entry threshold) so the sample classifies the host as a real
+	 * user environment and follows its normal task-routine path. Because the
+	 * sample does not merely read the integer count but walks the returned
+	 * array entry-by-entry, bumping *Count alone would make the per-entry loop
+	 * read past whatever (possibly empty/NULL) array the real call produced
+	 * and crash. So we also redirect *Credentials at a static array of five
+	 * well-formed, benign CREDENTIALW structs (generic type, plausible
+	 * target/user names) that stays valid for the life of the process, giving
+	 * the caller a real array of exactly five entries to iterate safely. A
+	 * host that already reports >= 5 credentials is passed through untouched.
 	 * lasterror is preserved around the forged response. */
-	if (!g_config.no_stealth && pshQueryRBInfo != NULL &&
-			(FAILED(ret) || pshQueryRBInfo->i64NumItems < 100)) {
+	if (!g_config.no_stealth && Count != NULL && Credentials != NULL &&
+			(!ret || *Count < 5)) {
 		get_lasterrors(&lasterror);
 
-		pshQueryRBInfo->i64NumItems = 100;
-		pshQueryRBInfo->i64Size = 100ll * 0x40000ll; /* ~25 MB across 100 items */
-		ret = S_OK;
+		if (!mirage_cred_ready) {
+			for (i = 0; i < 5; i++) {
+				memset(&mirage_cred_store[i], 0, sizeof(CREDENTIALW));
+				mirage_cred_store[i].Type = CRED_TYPE_GENERIC;
+				mirage_cred_store[i].Persist = CRED_PERSIST_LOCAL_MACHINE;
+				mirage_cred_store[i].TargetName = (LPWSTR)mirage_cred_targets[i];
+				mirage_cred_store[i].UserName = (LPWSTR)mirage_cred_users[i];
+				mirage_cred_ptrs[i] = &mirage_cred_store[i];
+			}
+			mirage_cred_ready = 1;
+		}
 
-		set_lasterrors(&lasterror);
-	}
-
-	LOQ_hresult("misc", "i", "NumItems",
-		pshQueryRBInfo != NULL ? (int)pshQueryRBInfo->i64NumItems : 0);
-
-	return ret;
-        }
-
-        HOOKDEF(HANDLE, WINAPI, FindFirstFileW, LPCWSTR lpFileName, LPWIN32_FIND_DATAW lpFindFileData)
-        {
-            HANDLE ret;
-	lasterror_t lasterror;
-
-	ret = Old_FindFirstFileW(lpFileName, lpFindFileData);
-
-	/* Samples resolve %USERPROFILE%\Pictures\Screenshots (the folder Win+PrtScn
-	 * writes to) and enumerate it with FindFirstFileW/FindNextFileW, counting
-	 * the non-directory image entries and treating a screenshot count below 15
-	 * as a freshly-imaged analysis VM on which no real user ever pressed
-	 * Win+PrtScn — i.e. an automated sandbox rather than an interactively-used
-	 * desktop — and take their sandbox-detected branch. On a bare guest that
-	 * folder is missing or empty, so the initial FindFirstFileW on the
-	 * Screenshots search mask returns INVALID_HANDLE_VALUE (ERROR_FILE_NOT_FOUND
-	 * / ERROR_PATH_NOT_FOUND) and the caller's do/while enumeration loop never
-	 * begins. When the search mask names the Screenshots folder and the real
-	 * search failed, hand back a distinct sentinel search handle (0x00000020) —
-	 * matching the sentinel-handle scheme used elsewhere in this file for the
-	 * TaskBar (0x00000001), Documents (0x00000002), Downloads (0x00000004) and
-	 * Internet Cache (0x00000008) walks — plus one synthesized first regular-file
-	 * entry (FILE_ATTRIBUTE_NORMAL, "Screenshot (1).png") so the enumeration
-	 * begins non-empty. The companion FindNextFileW hook recognises that same
-	 * sentinel handle and supplies the remaining synthetic "Screenshot (N).png"
-	 * entries until the counted total reaches 18 (past the < 15 threshold), so
-	 * checkCondition() classifies the host as a genuine, interactively-used
-	 * desktop even when the VM folder is empty. lasterror is preserved around the
-	 * forged response. */
-	if (!g_config.no_stealth && ret == INVALID_HANDLE_VALUE &&
-			lpFileName != NULL && lpFindFileData != NULL &&
-			wcsstr(lpFileName, L"Screenshots") != NULL) {
-		get_lasterrors(&lasterror);
-
-		memset(lpFindFileData, 0, sizeof(WIN32_FIND_DATAW));
-		lpFindFileData->dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
-		lstrcpyW(lpFindFileData->cFileName, L"Screenshot (1).png");
-		lpFindFileData->nFileSizeLow = 245760;
-
-		ret = (HANDLE)0x00000020;
+		*Count = 5;
+		*Credentials = mirage_cred_ptrs;
+		ret = TRUE;
 		lasterror.Win32Error = ERROR_SUCCESS;
 
 		set_lasterrors(&lasterror);
 	}
 
-	LOQ_handle("misc", "uu", "FileName", lpFileName != NULL ? lpFileName : L"",
-		"FirstEntry",
-		(ret != INVALID_HANDLE_VALUE && lpFindFileData != NULL) ? lpFindFileData->cFileName : L"");
+	LOQ_bool("registry", "ui", "Filter", Filter != NULL ? Filter : L"",
+		"Count", Count != NULL ? *Count : 0);
 
 	return ret;
+        }
+
+        HOOKDEF(void, WINAPI, GetNativeSystemInfo, LPSYSTEM_INFO lpSystemInfo)
+        {
+            int ret = 0;
+	lasterror_t lasterror;
+
+	Old_GetNativeSystemInfo(lpSystemInfo);
+
+	/* GetNativeSystemInfo is the WOW64/native sibling of GetSystemInfo: a
+	 * sample running under WOW64 (or one that simply resolves this export
+	 * instead) reads the true host logical-processor count from
+	 * SYSTEM_INFO.dwNumberOfProcessors here, bypassing any forge applied only
+	 * to GetSystemInfo. Samples treat a low core count as a hallmark of an
+	 * automated analysis VM, which are commonly provisioned with only 1-2
+	 * vCPUs. The check is written as a minimum-core gate
+	 * (dwNumberOfProcessors < 6 -> sandbox), so a guest that reports fewer than
+	 * 6 processors trips it and the sample takes its sandbox-detected branch
+	 * instead of running its normal task routine. On a typical analysis VM
+	 * whose vCPU count was not raised at the host, the real call reports a
+	 * sub-threshold value. After the real call, when the reported count is
+	 * below the 6-processor threshold, overwrite
+	 * lpSystemInfo->dwNumberOfProcessors with 8 so the >= 6 gate passes and the
+	 * sample classifies the host as a well-provisioned real machine and follows
+	 * its non-evasive path. Hooking both GetSystemInfo and its native sibling
+	 * ensures neither resolution path leaks the true core count. A host that
+	 * already reports enough processors is passed through untouched. lasterror
+	 * is preserved around the forged response. */
+	if (!g_config.no_stealth && lpSystemInfo != NULL &&
+			lpSystemInfo->dwNumberOfProcessors < 6) {
+		get_lasterrors(&lasterror);
+
+		lpSystemInfo->dwNumberOfProcessors = 8;
+
+		set_lasterrors(&lasterror);
+	}
+
+	LOQ_void("misc", "i", "NumberOfProcessors",
+		lpSystemInfo != NULL ? (int)lpSystemInfo->dwNumberOfProcessors : 0);
         }
 
         HOOKDEF(BOOL, WINAPI, GetSystemTimes, LPFILETIME lpIdleTime, LPFILETIME lpKernelTime, LPFILETIME lpUserTime)
         {
-            BOOL ret;
+            /* Per-call monotonic cumulative CPU-time accumulators (100ns units)
+               that back the forged OUT FILETIMEs. They are seeded once — from
+               the real reported totals when the genuine call succeeds, else
+               from a plausible fixed base — so the absolute values look like a
+               real, running system, and are then advanced by fixed per-call
+               deltas so any two snapshots the sample brackets around its Sleep
+               difference to a constant, sandbox-transparent idle ratio. Held in
+               static storage so the counters persist across the before/after
+               calls the sample makes. */
+	static ULONGLONG mirage_idle_100ns;
+	static ULONGLONG mirage_kernel_100ns;
+	static ULONGLONG mirage_user_100ns;
+	static int mirage_seeded;
+	BOOL ret;
 	lasterror_t lasterror;
 	ULARGE_INTEGER uIdle;
 	ULARGE_INTEGER uKernel;
@@ -563,41 +354,81 @@ return ret;
 
 	/* Samples fingerprint an idle, unused sandbox by sampling the system-wide
 	 * idle/kernel/user CPU totals with GetSystemTimes before and after a
-	 * 30000 ms Sleep, differencing each cumulative FILETIME into idleDelta and
-	 * kernelDelta+userDelta, and computing an idle fraction over the 30 s
-	 * observation window: idle_ratio = idleDelta / (idleDelta + kernelDelta +
-	 * userDelta) * 100. A freshly-imaged analysis VM with no interactive user
-	 * spends almost the whole window idle, so the fraction saturates above the
-	 * 95.0 threshold and the sample reads the host as an unattended sandbox,
-	 * taking its sandbox-detected branch (isUserEnv=false). The transparent
-	 * answer is to make the reported idle track busy CPU time one-for-one:
-	 * after the real call fills the cumulative totals, overwrite the OUT
-	 * lpIdleTime with the sum of the reported kernel and user totals
-	 * (idle := kernel + user). Because this rewrite is a fixed linear function
-	 * of the reported kernel/user totals and both bracketing snapshots the
-	 * sample takes pass through this hook, the derived idleDelta equals
-	 * kernelDelta+userDelta exactly regardless of how idle the machine really
-	 * was, so the recovered idle fraction is a forged ~50% — well under the
-	 * 95.0 sandbox threshold — forcing the sample onto its isUserEnv=true task
-	 * path. We only forge when all three cumulative totals are available (so the
-	 * kernel+user sum is well-defined) and never grow past the FILETIME range.
-	 * lasterror is preserved around the forged response. */
-	if (!g_config.no_stealth && ret && lpIdleTime != NULL &&
+	 * 30000 ms Sleep, differencing each cumulative FILETIME into idleDelta,
+	 * kernelDelta and userDelta, and computing an idle ratio over the 30 s
+	 * observation window: idleRatio = idleDelta / (kernelDelta + userDelta) *
+	 * 100. A freshly-imaged analysis VM with no interactive user spends almost
+	 * the whole window idle, so the ratio saturates above the 95.0 threshold and
+	 * the sample reads the host as an unattended sandbox, taking its
+	 * sandbox-detected branch (isUserEnv=false). GetSystemTimes is the clean
+	 * source-level intercept: it exposes idle/kernel/user as plain OUT FILETIME
+	 * buffers rather than the per-processor arrays its native
+	 * NtQuerySystemInformation(SystemProcessorPerformanceInformation)
+	 * decomposition returns. (Registered on kernelbase so the
+	 * kernel32->kernelbase forwarder cannot bypass the hook, same as the
+	 * GetTickCount64 forwarder fix.)
+	 *
+	 * The transparent answer is to maintain static per-call monotonic
+	 * accumulators and forge the three OUT FILETIMEs so each call advances the
+	 * reported cumulative totals by fixed deltas idleDelta=150000000,
+	 * kernelDelta=200000000, userDelta=100000000 (100ns units). Because both
+	 * bracketing snapshots the sample takes pass through this hook, the
+	 * recovered second-minus-first deltas are exactly those constants
+	 * regardless of how idle the machine really was, so the computed
+	 * idleRatio = 150000000 / (200000000 + 100000000) * 100 = 50.0 — comfortably
+	 * below the 95.0 sandbox threshold — forcing the sample onto its
+	 * isUserEnv=true task path. kernelDelta (200000000) >= idleDelta (150000000)
+	 * stays self-consistent with Windows reporting idle time inside kernel time.
+	 * The accumulators are strictly increasing and never approach the FILETIME
+	 * range, and ret is forced TRUE so an under-privileged real call still
+	 * yields a usable pair of snapshots. lasterror is preserved around the
+	 * forged response. */
+	if (!g_config.no_stealth && lpIdleTime != NULL &&
 			lpKernelTime != NULL && lpUserTime != NULL) {
 		get_lasterrors(&lasterror);
 
-		uKernel.LowPart = lpKernelTime->dwLowDateTime;
-		uKernel.HighPart = lpKernelTime->dwHighDateTime;
-		uUser.LowPart = lpUserTime->dwLowDateTime;
-		uUser.HighPart = lpUserTime->dwHighDateTime;
+		if (!mirage_seeded) {
+			mirage_seeded = 1;
+			if (ret) {
+				/* seed from the genuine cumulative totals so absolute
+				   values look like a real, running system */
+				uIdle.LowPart = lpIdleTime->dwLowDateTime;
+				uIdle.HighPart = lpIdleTime->dwHighDateTime;
+				uKernel.LowPart = lpKernelTime->dwLowDateTime;
+				uKernel.HighPart = lpKernelTime->dwHighDateTime;
+				uUser.LowPart = lpUserTime->dwLowDateTime;
+				uUser.HighPart = lpUserTime->dwHighDateTime;
+				mirage_idle_100ns = uIdle.QuadPart;
+				mirage_kernel_100ns = uKernel.QuadPart;
+				mirage_user_100ns = uUser.QuadPart;
+			} else {
+				/* real call failed: start from a plausible fixed base */
+				mirage_idle_100ns = 0x0000000C00000000ull;
+				mirage_kernel_100ns = 0x0000001000000000ull;
+				mirage_user_100ns = 0x0000000800000000ull;
+			}
+		}
 
-		/* idle advances in lockstep with busy (kernel+user) CPU time, so the
-		   sample's successive-snapshot idleDelta equals kernelDelta+userDelta
-		   and the computed idle fraction reads ~50%, not >95% */
-		uIdle.QuadPart = uKernel.QuadPart + uUser.QuadPart;
+		/* advance each cumulative total by its fixed per-call delta so the
+		   sample's successive-snapshot differencing yields idleDelta=150000000,
+		   kernelDelta=200000000, userDelta=100000000 => idleRatio = 50.0 */
+		mirage_idle_100ns += 150000000ull;
+		mirage_kernel_100ns += 200000000ull;
+		mirage_user_100ns += 100000000ull;
 
-		lpIdleTime->dwLowDateTime = (DWORD)(uIdle.QuadPart & 0xffffffffull);
-		lpIdleTime->dwHighDateTime = (DWORD)(uIdle.QuadPart >> 32);
+		uIdle.QuadPart = mirage_idle_100ns;
+		uKernel.QuadPart = mirage_kernel_100ns;
+		uUser.QuadPart = mirage_user_100ns;
+
+		lpIdleTime->dwLowDateTime = uIdle.LowPart;
+		lpIdleTime->dwHighDateTime = uIdle.HighPart;
+		lpKernelTime->dwLowDateTime = uKernel.LowPart;
+		lpKernelTime->dwHighDateTime = uKernel.HighPart;
+		lpUserTime->dwLowDateTime = uUser.LowPart;
+		lpUserTime->dwHighDateTime = uUser.HighPart;
+
+		ret = TRUE;
+		lasterror.Win32Error = ERROR_SUCCESS;
 
 		set_lasterrors(&lasterror);
 	}
@@ -610,222 +441,94 @@ return ret;
 	return ret;
         }
 
-        HOOKDEF(BOOL, WINAPI, GetProcessTimes, HANDLE hProcess, LPFILETIME lpCreationTime, LPFILETIME lpExitTime, LPFILETIME lpKernelTime, LPFILETIME lpUserTime)
+        HOOKDEF(BOOL, WINAPI, PathFileExistsA, LPCSTR pszPath)
         {
-            BOOL ret;
+            static const char *tool_suffixes[] = {
+			"\\7-zip", "\\winrar", "\\winzip" };
+
+	BOOL ret;
 	lasterror_t lasterror;
-	static ULONGLONG wall_base_100ns;
-	static ULONGLONG cpu_last_100ns;
-	static int base_initialized;
-	FILETIME ft_now;
-	ULARGE_INTEGER u_now;
-	ULONGLONG wall_now_100ns;
-	ULONGLONG wall_delta_100ns;
-	ULONGLONG cpu_total_100ns;
-	ULONGLONG kernel_100ns;
-	ULONGLONG user_100ns;
+	char path[MAX_PATH];
+	size_t len, i;
+	int matched = 0;
 
-	ret = Old_GetProcessTimes(hProcess, lpCreationTime, lpExitTime, lpKernelTime, lpUserTime);
+	ret = Old_PathFileExistsA(pszPath);
 
-	/* Samples fingerprint scheduler/virtualization overhead with a CPU-vs-wall
-	 * timing-skew test: they read the process kernel+user CPU time via
-	 * GetProcessTimes, spin a CPU-intensive busy loop, read the times again,
-	 * and compare the (kernelEnd+userEnd)-(kernelStart+userStart) 100ns delta
-	 * against the GetSystemTimeAsFileTime wall-clock delta over the same span:
-	 *   wallToCpuRatio = wallDelta / cpuDelta
-	 * A busy loop on bare metal pins one core so the reported CPU time tracks
-	 * wall time and the ratio sits near 1.0, but under a contended/throttled
-	 * analysis VM the reported CPU time lags the wall clock (or a coarse timer
-	 * reports a zero CPU delta), pushing wallToCpuRatio >= 2.0 (and cpuDelta==0
-	 * yields +inf), which the sample reads as "running virtualized" and uses to
-	 * take its sandbox-detected branch. Neutralize the check by making the
-	 * reported kernel+user time advance in lockstep with real wall-clock time:
-	 * track a GetSystemTimeAsFileTime baseline captured on the first call plus
-	 * the last synthetic CPU total we returned, and for the current process
-	 * overwrite lpKernelTime/lpUserTime with a cumulative value equal to ~95% of
-	 * the elapsed wall-clock delta (split 1/4 kernel, 3/4 user). The accumulator
-	 * is forced strictly increasing so consecutive calls never report an
-	 * unchanged (zero-delta) CPU time. Because both readings the sample takes are
-	 * derived from the same wall baseline, cpuTimeDiff100ns ~= wallTimeDiff100ns
-	 * and wallToCpuRatio ~= 1/0.95 ~= 1.05 regardless of actual scheduler
-	 * overhead, staying well below the 2.0 threshold without touching RDTSC or
-	 * the system-time sources. lasterror is preserved around the forged
-	 * response. */
-	if (!g_config.no_stealth && ret &&
-			(hProcess == GetCurrentProcess() ||
-			 GetProcessId(hProcess) == GetCurrentProcessId()) &&
-			(lpKernelTime != NULL || lpUserTime != NULL)) {
+	/* Samples probe for installed compression utilities to decide they are on
+	 * a real user desktop: PathFileExistsA("%ProgramFiles%\\7-Zip" / "\\WinRAR"
+	 * / "\\WinZip", and the Program Files (x86) variants) is called directly as
+	 * the existence check. On a bare analysis VM none of those directories
+	 * exist, so the call returns FALSE, the foundTools set stays empty and the
+	 * sample takes its sandbox-evasion branch. To keep the sample on its normal
+	 * path we inspect pszPath: when it ends in one of the three tool directory
+	 * names ("\\7-Zip", "\\WinRAR", "\\WinZip"), covering both the 64-bit and
+	 * (x86) Program Files roots, we force the existence check to report TRUE so
+	 * the directory appears to exist and foundTools becomes non-empty. Only
+	 * these specific compression-tool paths are matched; all other paths pass
+	 * through to the real Old_PathFileExistsA result. Lasterror is preserved
+	 * around the forged response. */
+	if (!g_config.no_stealth && pszPath != NULL) {
+		len = strlen(pszPath);
+		if (len > 0 && len < sizeof(path)) {
+			memcpy(path, pszPath, len + 1);
+
+			for (i = 0; i < len; i++) {
+				if (path[i] >= 'A' && path[i] <= 'Z')
+					path[i] = (char)(path[i] - 'A' + 'a');
+			}
+
+			for (i = 0; i < 3; i++) {
+				size_t sl = strlen(tool_suffixes[i]);
+				if (len >= sl &&
+					strcmp(path + len - sl, tool_suffixes[i]) == 0) {
+					matched = 1;
+					break;
+				}
+			}
+		}
+	}
+
+	if (matched) {
 		get_lasterrors(&lasterror);
 
-		GetSystemTimeAsFileTime(&ft_now);
-		u_now.LowPart = ft_now.dwLowDateTime;
-		u_now.HighPart = ft_now.dwHighDateTime;
-		wall_now_100ns = u_now.QuadPart;
-
-		if (!base_initialized) {
-			wall_base_100ns = wall_now_100ns;
-			cpu_last_100ns = 0;
-			base_initialized = 1;
-		}
-
-		/* elapsed real wall-clock time since our baseline, in 100ns units */
-		wall_delta_100ns = (wall_now_100ns >= wall_base_100ns) ?
-			(wall_now_100ns - wall_base_100ns) : 0;
-
-		/* target cumulative CPU time = ~95% of elapsed wall clock, so the
-		   sample's cpuDelta ~= wallDelta and wallToCpuRatio ~= 1.05 < 2.0 */
-		cpu_total_100ns = wall_delta_100ns * 95ull / 100ull;
-
-		/* never report an unchanged (zero-delta) CPU time between consecutive
-		   calls: keep the returned CPU total strictly increasing so cpuDelta is
-		   always non-zero and the ratio never blows up to +inf */
-		if (cpu_total_100ns <= cpu_last_100ns)
-			cpu_total_100ns = cpu_last_100ns + 1ull;
-		cpu_last_100ns = cpu_total_100ns;
-
-		kernel_100ns = cpu_total_100ns / 4ull;
-		user_100ns = cpu_total_100ns - kernel_100ns;
-
-		if (lpKernelTime != NULL) {
-			lpKernelTime->dwLowDateTime = (DWORD)(kernel_100ns & 0xffffffffull);
-			lpKernelTime->dwHighDateTime = (DWORD)(kernel_100ns >> 32);
-		}
-		if (lpUserTime != NULL) {
-			lpUserTime->dwLowDateTime = (DWORD)(user_100ns & 0xffffffffull);
-			lpUserTime->dwHighDateTime = (DWORD)(user_100ns >> 32);
-		}
+		ret = TRUE;
+		lasterror.Win32Error = ERROR_SUCCESS;
 
 		set_lasterrors(&lasterror);
 	}
 
-	LOQ_bool("misc", "ii", "KernelTime",
-		lpKernelTime != NULL ? lpKernelTime->dwLowDateTime : 0,
-		"UserTime",
-		lpUserTime != NULL ? lpUserTime->dwLowDateTime : 0);
-
+	LOQ_bool("misc", "s", "Path", pszPath);
 	return ret;
         }
 
-HOOKDEF(BOOL, WINAPI, AddClipboardFormatListener, HWND hwnd)
-{
-    /* Records the HWND the sample registered as its clipboard-format
-       listener so the companion PeekMessageA hook can address its injected
-       WM_CLIPBOARDUPDATE broadcasts to the correct listener window for
-       delivery to that window's WndProc. */
-static HWND mirage_clipboard_listener_hwnd;
-BOOL ret;
-lasterror_t lasterror;
+        HOOKDEF(HRESULT, WINAPI, SLIsGenuineLocal, const SLID* pAppId, SL_GENUINE_STATE* pGenuineState, PVOID pvReserved)
+        {
+            HRESULT ret;
+	lasterror_t lasterror;
 
-ret = Old_AddClipboardFormatListener(hwnd);
+	ret = Old_SLIsGenuineLocal(pAppId, pGenuineState, pvReserved);
 
-/* Samples create a hidden monitor window and register it with
- * AddClipboardFormatListener so Windows broadcasts WM_CLIPBOARDUPDATE
- * (0x031D) to its WndProc whenever the clipboard contents change; they
- * then pump PeekMessageA and count those updates as evidence of a live,
- * interactive user (see the companion PeekMessageA hook). The
- * registration is a prerequisite for that clipboard-liveness probe: on a
- * session-0 / headless analysis desktop AddClipboardFormatListener can
- * fail (e.g. the window is not on an interactive window station), so the
- * listener is never wired up, no WM_CLIPBOARDUPDATE is ever delivered,
- * clipboardUpdateCount_ stays at 0, and the sample reads the absent
- * clipboard activity as an idle sandbox and takes its sandbox-detected
- * branch. The transparent answer is to make the registration always report
- * success and to record the HWND the sample registered, so the companion
- * PeekMessageA hook can target its synthetic WM_CLIPBOARDUPDATE at the
- * correct listener window. We call the real API first so a genuine
- * registration still happens where the desktop allows it, then force the
- * return value to TRUE (the task's forced value) and remember hwnd.
- * lasterror is preserved around the forged response. */
-if (!g_config.no_stealth) {
-        get_lasterrors(&lasterror);
+	/* slwga.dll is loaded via LoadLibraryW and SLIsGenuineLocal is called
+	 * directly for the Windows AppId {55c92734-d682-4d71-983e-d6ec3f16059f}.
+	 * The sample gates on two things: the HRESULT must be S_OK (a non-S_OK
+	 * return aborts the payload outright in gatherInfo()), and *pGenuineState
+	 * must read SL_GEN_STATE_IS_GENUINE (0) for isGenuine to evaluate true.
+	 * Any other genuine-state, or an outright call failure, is treated as an
+	 * unactivated/throwaway analysis VM. Force the licensing verdict to look
+	 * like an activated retail machine: write SL_GEN_STATE_IS_GENUINE into
+	 * *pGenuineState and return S_OK so both the success-but-not-genuine and
+	 * the outright-failure evasion branches are neutralised and gatherInfo()
+	 * does not abort. Lasterror is preserved around the forced response. */
+	if (!g_config.no_stealth) {
+		get_lasterrors(&lasterror);
 
-        mirage_clipboard_listener_hwnd = hwnd;
-        ret = TRUE;
-        lasterror.Win32Error = ERROR_SUCCESS;
+		if (pGenuineState != NULL)
+			*pGenuineState = SL_GEN_STATE_IS_GENUINE;
+		ret = S_OK;
 
-        set_lasterrors(&lasterror);
-}
+		set_lasterrors(&lasterror);
+	}
 
-LOQ_bool("window", "pp", "hwnd", hwnd,
-        "ListenerHwnd", mirage_clipboard_listener_hwnd);
-
-return ret;
-}
-
-HOOKDEF(BOOL, WINAPI, PeekMessageW, LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg)
-{
-    /* WM_EXITSIZEMOVE is the message a window's WndProc receives when
-       the user finishes a modal move/resize loop (releasing the title
-       bar or a sizing border); guard the define in case the SDK headers
-       visible in this TU predate it. */
-#ifndef WM_EXITSIZEMOVE
-#define WM_EXITSIZEMOVE 0x0232
-#endif
-/* The move/resize-liveness probe is satisfied by a single observed
-   WM_EXITSIZEMOVE, so inject exactly one synthetic message for the
-   lifetime of this process. A one-shot flag keeps the forged event
-   looking like a lone, genuine move/resize completion rather than a
-   repeating counter. */
-static int mirage_exitsizemove_injected;
-BOOL ret;
-lasterror_t lasterror;
-int filter_ok;
-
-ret = Old_PeekMessageW(lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg);
-
-/* Samples create a top-level observation window and pump its message
- * loop with PeekMessageW, routing each retrieved MSG through
- * TranslateMessage/DispatchMessageW so the window's WndProc runs; that
- * WndProc counts every WM_EXITSIZEMOVE (0x0232) it receives into
- * m_exitSizeMoveCount. checkCondition() treats a total below the
- * threshold (count < 1 — i.e. the window was never interactively moved
- * or resized across a 60000 ms observation window) as an idle, headless
- * analysis VM with no live user dragging or sizing windows, and steers
- * the sample into its sandbox-detected branch. On a freshly-imaged guest
- * with nobody at the mouse the window is never moved, so no
- * WM_EXITSIZEMOVE is ever posted, the WndProc never fires, and
- * m_exitSizeMoveCount stays at 0. The transparent answer is to make the
- * pumped queue carry one real-looking move/resize completion: when the
- * genuine PeekMessageW finds no message waiting, once for the life of the
- * process hand back a synthetic WM_EXITSIZEMOVE addressed to the sample's
- * top-level window so its own TranslateMessage/DispatchMessageW routes it
- * to that WndProc and increments m_exitSizeMoveCount past the threshold
- * of 1. We only inject on an otherwise-empty poll (real ret == FALSE) so
- * no genuine queued message is ever dropped, we honour the caller's
- * [wMsgFilterMin, wMsgFilterMax] range filter (0/0 means no filter) so
- * the forged message is one the caller actually asked for, and we inject
- * at most once so the event reads as a lone genuine move/resize rather
- * than a per-call flood. lpMsg->hwnd is set to the caller's filter window
- * when one was supplied (the sample typically peeks on its observation
- * window), otherwise to the active window, so DispatchMessageW delivers
- * the message to a live WndProc. lasterror is preserved around the forged
- * response. */
-if (!g_config.no_stealth && !ret && lpMsg != NULL &&
-                !mirage_exitsizemove_injected) {
-        /* WM_EXITSIZEMOVE must fall within the caller's message-range
-           filter; a 0/0 range means "no filter", so accept everything */
-        filter_ok = (wMsgFilterMin == 0 && wMsgFilterMax == 0) ||
-                (WM_EXITSIZEMOVE >= wMsgFilterMin &&
-                 WM_EXITSIZEMOVE <= wMsgFilterMax);
-
-        if (filter_ok) {
-                get_lasterrors(&lasterror);
-
-                memset(lpMsg, 0, sizeof(MSG));
-                lpMsg->hwnd = (hWnd != NULL) ? hWnd : GetActiveWindow();
-                lpMsg->message = WM_EXITSIZEMOVE;
-                lpMsg->time = GetTickCount();
-                ret = TRUE;
-                mirage_exitsizemove_injected = 1;
-                lasterror.Win32Error = ERROR_SUCCESS;
-
-                set_lasterrors(&lasterror);
+	LOQ_hresult("misc", "p", "AppId", pAppId);
+	return ret;
         }
-}
-
-LOQ_bool("window", "pii", "hWnd", hWnd, "Message",
-        (ret && lpMsg != NULL) ? (int)lpMsg->message : 0,
-        "RemoveMsg", (int)wRemoveMsg);
-
-return ret;
-}
