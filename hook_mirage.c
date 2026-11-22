@@ -6,7 +6,6 @@
 #include "hooking.h"
 #include <tlhelp32.h>
 #include <slpublic.h>
-#include <winspool.h>
 #include "log.h"
 #include "config.h"
         HOOKDEF(BOOL, WINAPI, PathFileExistsA, LPCSTR pszPath)
@@ -94,85 +93,6 @@
 	LOQ_void("misc", "i", "NumberOfProcessors",
 		lpSystemInfo != NULL ? lpSystemInfo->dwNumberOfProcessors : 0);
 	return;
-        }
-
-        HOOKDEF(BOOL, WINAPI, EnumPrintersA, DWORD Flags, LPSTR Name, DWORD Level, LPBYTE pPrinterEnum, DWORD cbBuf, LPDWORD pcbNeeded, LPDWORD pcReturned)
-        {
-            BOOL ret = Old_EnumPrintersA(Flags, Name, Level, pPrinterEnum, cbBuf,
-		pcbNeeded, pcReturned);
-
-	if (!g_config.no_stealth) {
-		/* C89 declaration ordering: all declarations first. */
-		static const char forged_name[] = "HP LaserJet 1020";
-		DWORD forged_len = (DWORD)sizeof(forged_name); /* includes NUL */
-		DWORD extra = (DWORD)sizeof(PRINTER_INFO_1A) + forged_len;
-		int relevant = (Level == 1 &&
-			(Flags & (PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS)) != 0);
-		lasterror_t lasterror;
-
-		/* Preserve the caller-visible last error across our forging. */
-		get_lasterrors(&lasterror);
-
-		/* The sample enumerates local/connected printers at PRINTER_INFO_1A
-		 * level, discards the known virtual-printer names (Microsoft Print to
-		 * PDF, Microsoft XPS Document Writer, Fax, OneNote) and treats an empty
-		 * remaining list as proof of a sandbox (physicalPrinters.size() == 0).
-		 * Inject one synthetic physical printer so that check returns true. */
-		if (relevant) {
-			if (pPrinterEnum == NULL || ret == FALSE) {
-				/* Sizing call: grow the required byte count so the caller
-				 * allocates room for our extra entry plus its name string. */
-				if (pcbNeeded != NULL)
-					*pcbNeeded += extra;
-			} else {
-				/* Fill call succeeded: append one PRINTER_INFO_1A entry. The
-				 * struct array grows from the buffer base while the variable-
-				 * length strings are packed at the top of the buffer. Place our
-				 * new struct after the last existing one and our name string
-				 * just below the current lowest string, using the headroom the
-				 * grown sizing call reserved. */
-				PPRINTER_INFO_1A entries = (PPRINTER_INFO_1A)pPrinterEnum;
-				DWORD count = (pcReturned != NULL) ? *pcReturned : 0;
-				BYTE *string_low = pPrinterEnum + cbBuf;
-				BYTE *struct_end;
-				BYTE *strdst;
-				DWORD i;
-
-				for (i = 0; i < count; i++) {
-					if (entries[i].pName != NULL &&
-						(BYTE *)entries[i].pName < string_low)
-						string_low = (BYTE *)entries[i].pName;
-					if (entries[i].pDescription != NULL &&
-						(BYTE *)entries[i].pDescription < string_low)
-						string_low = (BYTE *)entries[i].pDescription;
-					if (entries[i].pComment != NULL &&
-						(BYTE *)entries[i].pComment < string_low)
-						string_low = (BYTE *)entries[i].pComment;
-				}
-
-				struct_end = (BYTE *)&entries[count + 1];
-				strdst = string_low - forged_len;
-
-				if (strdst >= struct_end) {
-					memcpy(strdst, forged_name, forged_len);
-					entries[count].Flags = 0;
-					entries[count].pDescription = (LPSTR)strdst;
-					entries[count].pName = (LPSTR)strdst;
-					entries[count].pComment = (LPSTR)strdst;
-					if (pcReturned != NULL)
-						*pcReturned = count + 1;
-					if (pcbNeeded != NULL)
-						*pcbNeeded += extra;
-					ret = TRUE;
-				}
-			}
-		}
-
-		set_lasterrors(&lasterror);
-	}
-
-	LOQ_bool("misc", "ipi", "Flags", Flags, "Name", Name, "Level", Level);
-	return ret;
         }
 
         HOOKDEF(HRESULT, WINAPI, SLIsGenuineLocal, const SLID* pAppId, SL_GENUINE_STATE* pGenuineState, PVOID pvReserved)
