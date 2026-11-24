@@ -32,6 +32,32 @@ void SpoofWmiData(const wchar_t* szClassName, const wchar_t* wszName, VARIANT* p
 				pVal->bstrVal = SysAllocString(WIDE_SPOOFED_RAM_IN_KB);
 			}
 		}
+		// SAGE/MIRAGE: rewrite virtual-NIC OUI prefixes in Win32_NetworkAdapter
+		// MACAddress ("XX:XX:XX:...") to a benign vendor OUI so MAC/OUI sandbox
+		// checks (e.g. galloro_090) see a physical-looking MAC. In-process WMI
+		// marshalling path, so this reaches wmiprvse-sourced results.
+		else if (!_wcsicmp(wszName, L"MACAddress")) {
+			static const wchar_t *mirage_virt_oui[] = {
+				L"00:05:69", L"00:0C:29", L"00:1C:14", L"00:50:56", // VMware
+				L"08:00:27", // VirtualBox
+				L"00:15:5D", // Hyper-V / Azure
+				L"00:1C:42", // Parallels
+				L"00:16:3E", // Xen / KVM
+				L"52:54:00", // QEMU / KVM
+			};
+			if (SysStringLen(pVal->bstrVal) >= 8) {
+				int mirage_k;
+				for (mirage_k = 0; mirage_k < (int)(sizeof(mirage_virt_oui) / sizeof(mirage_virt_oui[0])); mirage_k++) {
+					if (!_wcsnicmp(pVal->bstrVal, mirage_virt_oui[mirage_k], 8)) {
+						// keep NIC-specific tail, swap OUI to Dell 00:14:22
+						pVal->bstrVal[0] = L'0'; pVal->bstrVal[1] = L'0';
+						pVal->bstrVal[3] = L'1'; pVal->bstrVal[4] = L'4';
+						pVal->bstrVal[6] = L'2'; pVal->bstrVal[7] = L'2';
+						break;
+					}
+				}
+			}
+		}
 		//
 		// Logic for BSTR fakery specific to an exact szClassName
 		//
