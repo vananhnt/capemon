@@ -557,6 +557,7 @@ hook_t full_hooks[] = {
 	HOOK(ncrypt, SslDecryptPacket),
 	HOOK(iphlpapi, GetAdaptersAddresses),
 	HOOK(iphlpapi, GetAdaptersInfo),
+	HOOK(iphlpapi, GetIpNetTable),
 	HOOK(urlmon, CoInternetSetFeatureEnabled),
 	HOOK(ole32, MkParseDisplayName),
 	HOOK(urlmon, MkParseDisplayNameEx),
@@ -1479,6 +1480,7 @@ hook_t office_hooks[] = {
 	HOOK(ncrypt, SslDecryptPacket),
 	HOOK(iphlpapi, GetAdaptersAddresses),
 	HOOK(iphlpapi, GetAdaptersInfo),
+	HOOK(iphlpapi, GetIpNetTable),
 	HOOK(urlmon, CoInternetSetFeatureEnabled),
 
 	// Service Hooks

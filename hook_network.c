@@ -988,6 +988,58 @@ HOOKDEF(DWORD, WINAPI, GetAdaptersInfo,
 	return ret;
 }
 
+// SAGE/MIRAGE: neutralize virtual-NIC OUI tells in the ARP table so
+// GetIpNetTable-based sandbox checks (e.g. galloro_090) see a benign vendor
+// OUI instead of QEMU/VMware/VBox/Hyper-V/Xen prefixes. In-process iphlpapi
+// path; rewrites only known-virtual OUIs, keeping the NIC-specific low bytes.
+typedef struct _MIRAGE_MIB_IPNETROW {
+	DWORD dwIndex;
+	DWORD dwPhysAddrLen;
+	BYTE  bPhysAddr[8];
+	DWORD dwAddr;
+	DWORD dwType;
+} MIRAGE_MIB_IPNETROW;
+typedef struct _MIRAGE_MIB_IPNETTABLE {
+	DWORD dwNumEntries;
+	MIRAGE_MIB_IPNETROW table[1];
+} MIRAGE_MIB_IPNETTABLE;
+
+HOOKDEF(DWORD, WINAPI, GetIpNetTable,
+	_Out_   PVOID  IpNetTable,   // PMIB_IPNETTABLE
+	_Inout_ PULONG SizePointer,
+	_In_    BOOL   Order
+) {
+	DWORD ret = Old_GetIpNetTable(IpNetTable, SizePointer, Order);
+	if (ret == 0 && IpNetTable) {
+		static const BYTE virt_ouis[][3] = {
+			{0x00,0x05,0x69},{0x00,0x0C,0x29},{0x00,0x1C,0x14},{0x00,0x50,0x56}, // VMware
+			{0x08,0x00,0x27}, // VirtualBox
+			{0x00,0x15,0x5D}, // Hyper-V / Azure
+			{0x00,0x1C,0x42}, // Parallels
+			{0x00,0x16,0x3E}, // Xen / KVM
+			{0x52,0x54,0x00}, // QEMU / KVM
+		};
+		MIRAGE_MIB_IPNETTABLE *t = (MIRAGE_MIB_IPNETTABLE *)IpNetTable;
+		unsigned int i, j;
+		for (i = 0; i < t->dwNumEntries; i++) {
+			if (t->table[i].dwPhysAddrLen >= 3) {
+				for (j = 0; j < sizeof(virt_ouis) / 3; j++) {
+					if (t->table[i].bPhysAddr[0] == virt_ouis[j][0] &&
+						t->table[i].bPhysAddr[1] == virt_ouis[j][1] &&
+						t->table[i].bPhysAddr[2] == virt_ouis[j][2]) {
+						t->table[i].bPhysAddr[0] = 0x00; // Dell OUI
+						t->table[i].bPhysAddr[1] = 0x14;
+						t->table[i].bPhysAddr[2] = 0x22;
+						break;
+					}
+				}
+			}
+		}
+	}
+	LOQ_zero("network", "");
+	return ret;
+}
+
 HOOKDEF(ULONG, WINAPI, NetGetJoinInformation,
 	_In_  LPCWSTR			   lpServer,
 	_Out_ LPWSTR				*lpNameBuffer,

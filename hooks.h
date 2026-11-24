@@ -2575,6 +2575,12 @@ HOOKDEF(DWORD, WINAPI, GetAdaptersInfo,
 	_Inout_ PULONG		   pOutBufLen
 );
 
+HOOKDEF(DWORD, WINAPI, GetIpNetTable,
+	_Out_   PVOID  IpNetTable, // PMIB_IPNETTABLE
+	_Inout_ PULONG SizePointer,
+	_In_    BOOL   Order
+);
+
 HOOKDEF(ULONG, WINAPI, NetGetJoinInformation,
 	_In_  LPCWSTR			   lpServer,
 	_Out_ LPWSTR				*lpNameBuffer,
