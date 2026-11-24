@@ -683,6 +683,49 @@ HOOKDEF(BOOL, WINAPI, GetGUIThreadInfo,
 	return ret;
 }
 
+HOOKDEF(DWORD, WINAPI, GetClipboardSequenceNumber,
+	void
+) {
+	DWORD ret = Old_GetClipboardSequenceNumber();
+
+	if (g_config.mirage_input_sim) {
+		/* SAGE/MIRAGE: a clipboard-activity check (galloro_011) samples
+		   GetClipboardSequenceNumber at start and polls it over an observation
+		   window; if the value ever changes it concludes a real user copied
+		   something. Return a monotonically increasing sequence (base seeded from
+		   the real value) so successive polls differ, with an occasional held
+		   value so it doesn't tick on literally every single call. */
+		static DWORD mcs_base = 0;
+		static DWORD mcs_off = 0;
+		static int mcs_hold = 0;
+		if (mcs_base == 0)
+			mcs_base = ret ? ret : (raw_gettickcount() | 1);
+		if ((mcs_hold++ & 1) == 0)
+			mcs_off += 1 + (raw_gettickcount() % 2);
+		ret = mcs_base + mcs_off;
+	}
+
+	LOQ_zero("misc", "");
+	return ret;
+}
+
+HOOKDEF(HWND, WINAPI, GetForegroundWindow,
+	void
+) {
+	HWND ret = Old_GetForegroundWindow();
+
+	if (g_config.mirage_input_sim && ret == NULL) {
+		/* SAGE/MIRAGE: in a non-interactive analysis session there may be no
+		   foreground window, which several input checks (e.g. galloro_080's
+		   layout poll) treat as a sandbox tell. Fall back to the desktop window
+		   so the precondition "an active window exists" holds. */
+		ret = GetDesktopWindow();
+	}
+
+	LOQ_nonnull("misc", "p", "ForegroundWindow", (DWORD_PTR)ret);
+	return ret;
+}
+
 HOOKDEF(SHORT, WINAPI, GetKeyState,
 	_In_ int nVirtKey
 ) {
@@ -1742,6 +1785,21 @@ HOOKDEF(HKL, WINAPI, GetKeyboardLayout,
 	HKL ret = Old_GetKeyboardLayout(idThread);
 	if (g_config.lang)
 		ret = (HKL)(DWORD_PTR)g_config.lang;
+	if (g_config.mirage_input_sim) {
+		/* SAGE/MIRAGE: a keyboard-layout-switch check (galloro_080) polls
+		   GetKeyboardLayout over a window and concludes "real user" only if the
+		   active layout CHANGES (a human toggling input languages). Alternate
+		   between the base layout and a second plausible layout on successive
+		   reads so the sample observes a switch. Never return NULL (the sample
+		   treats NULL as "no foreground / sandbox"). */
+		static int mgkl_poll = 0;
+		DWORD_PTR base = g_config.lang ? (DWORD_PTR)g_config.lang
+									   : (ret ? (DWORD_PTR)ret : 0x04090409);
+		DWORD_PTR alt  = 0x04110411; /* ja-JP */
+		if (base == alt)
+			alt = 0x04070407; /* de-DE */
+		ret = (HKL)(((++mgkl_poll) & 1) ? base : alt);
+	}
 	const char* LanguageName = NULL;
 	if (ret)
 		LanguageName = GetLanguageName((LANGID)ret);

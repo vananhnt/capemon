@@ -649,9 +649,26 @@ HOOKDEF(BOOL, WINAPI, GetLastInputInfo,
 
 	lastinput_called++;
 
-	/* fake recent user activity */
-	if (lastinput_called > 2 && plii && plii->cbSize == 8)
-		plii->dwTime = raw_gettickcount() + (DWORD)(time_skipped.QuadPart / 10000);
+	if (plii && plii->cbSize == sizeof(LASTINPUTINFO)) {
+		if (g_config.mirage_input_sim) {
+			/* SAGE/MIRAGE: report a small, human-plausible idle interval so an
+			   idle-time check (galloro_084: idle = GetTickCount64() - lii.dwTime)
+			   takes the real-user branch. Compute "now" in the SAME timebase the
+			   hooked GetTickCount64 returns, then back-date by a jittered 2-9s so
+			   the idle looks like a momentarily-paused human, not a suspicious
+			   exact 0. dwTime is 32-bit; uptime fits in 32 bits here, so the low
+			   dword the sample subtracts against matches. */
+			ULONGLONG now64 = raw_gettickcount64();
+			if (sleep_skip_active)
+				now64 += (time_skipped.QuadPart / 10000);
+			DWORD jitter = 2000 + (raw_gettickcount() % 7000);
+			plii->dwTime = (DWORD)(now64 - jitter);
+			ret = TRUE;
+		} else if (lastinput_called > 2) {
+			/* legacy fake recent user activity */
+			plii->dwTime = raw_gettickcount() + (DWORD)(time_skipped.QuadPart / 10000);
+		}
+	}
 
 	return ret;
 }

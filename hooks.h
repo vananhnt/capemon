@@ -2008,6 +2008,14 @@ HOOKDEF(BOOL, WINAPI, GetGUIThreadInfo,
 	_Inout_ PGUITHREADINFO pgui
 );
 
+HOOKDEF(DWORD, WINAPI, GetClipboardSequenceNumber,
+	void
+);
+
+HOOKDEF(HWND, WINAPI, GetForegroundWindow,
+	void
+);
+
 HOOKDEF(SHORT, WINAPI, GetKeyState,
 	_In_ int nVirtKey
 );
