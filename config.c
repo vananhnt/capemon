@@ -183,6 +183,9 @@ void parse_config_line(char* line)
 			if (!g_config.force_sleepskip)
 				disable_sleep_skip();
 		}
+		else if (!strcmp(key, "mirage-input-sim")) { // SAGE/MIRAGE: synthesize human caret/cursor activity for input-observation evasion checks (independent of sleep-skip).
+			g_config.mirage_input_sim = value[0] == '1';
+		}
 		else if (!strcmp(key, "serial")) { //Spoof the serial of the system volume as the provided hex value
 			g_config.serial_number = (unsigned int)strtoul(value, NULL, 16);
 		}

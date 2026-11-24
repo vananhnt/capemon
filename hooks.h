@@ -2003,6 +2003,11 @@ HOOKDEF(BOOL, WINAPI, GetCursorPos,
 	_Out_ LPPOINT lpPoint
 );
 
+HOOKDEF(BOOL, WINAPI, GetGUIThreadInfo,
+	_In_    DWORD idThread,
+	_Inout_ PGUITHREADINFO pgui
+);
+
 HOOKDEF(BOOL, WINAPI, GetComputerNameA,
 	_Out_	PCTSTR lpBuffer,
 	_Inout_  LPDWORD lpnSize

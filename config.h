@@ -110,6 +110,10 @@ struct _g_config {
 	// do we force sleep-skipping despite threads?
 	int force_sleepskip;
 
+	// SAGE/MIRAGE: synthesize human input-activity for observation-loop evasion
+	// checks (caret/cursor movement) independent of sleep-skipping. 0 = off.
+	int mirage_input_sim;
+
 	// do we force flushing of each log?
 	int force_flush;
 

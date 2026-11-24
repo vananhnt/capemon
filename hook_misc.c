@@ -603,8 +603,28 @@ HOOKDEF(BOOL, WINAPI, GetCursorPos,
 	ENSURE_STRUCT(lpPoint, POINT);
 	BOOL ret = Old_GetCursorPos(lpPoint);
 
+	if (g_config.mirage_input_sim && ret && lpPoint) {
+		/* SAGE/MIRAGE: synthesize a human-like cursor path for input-observation
+		   evasion checks (cursor-movement naturalness) regardless of sleep-skip. */
+		static int mcp_init = 0;
+		static int mcp_x, mcp_y, mcp_dir;
+		static const int mcp_dx[8] = { 4, 3, -3, -4, -3,  3, 4,  0 };
+		static const int mcp_dy[8] = { 0, 3,  4,  3, -3, -4, -3, -4 };
+		int xr = our_GetSystemMetrics(0);
+		int yr = our_GetSystemMetrics(1);
+		if (!mcp_init) { mcp_x = xr / 2; mcp_y = yr / 2; mcp_dir = 0; mcp_init = 1; }
+		mcp_x += mcp_dx[mcp_dir];
+		mcp_y += mcp_dy[mcp_dir];
+		if (mcp_x < 10) mcp_x = 10;
+		if (xr > 20 && mcp_x > xr - 10) mcp_x = xr - 10;
+		if (mcp_y < 10) mcp_y = 10;
+		if (yr > 20 && mcp_y > yr - 10) mcp_y = yr - 10;
+		mcp_dir = (mcp_dir + 1 + (random() & 1)) & 7;
+		lpPoint->x = mcp_x;
+		lpPoint->y = mcp_y;
+	}
 	/* work around the fact that skipping sleeps prevents the human module from making the system look active */
-	if (ret && time_skipped.QuadPart != last_skipped.QuadPart) {
+	else if (ret && time_skipped.QuadPart != last_skipped.QuadPart) {
 		int xres, yres;
 		xres = our_GetSystemMetrics(0);
 		yres = our_GetSystemMetrics(1);
@@ -634,6 +654,32 @@ HOOKDEF(BOOL, WINAPI, GetCursorPos,
 	else{
 		LOQ_bool("misc", "ii", "x", 0, "y", 0);
 	}
+	return ret;
+}
+
+HOOKDEF(BOOL, WINAPI, GetGUIThreadInfo,
+	_In_    DWORD idThread,
+	_Inout_ PGUITHREADINFO pgui
+) {
+	BOOL ret = Old_GetGUIThreadInfo(idThread, pgui);
+
+	if (g_config.mirage_input_sim && pgui && pgui->cbSize == sizeof(GUITHREADINFO)) {
+		/* SAGE/MIRAGE: present a moving text caret so caret-movement observation
+		   checks classify the environment as an interactive user session. */
+		static int mgt_n = 0;
+		LONG base;
+		mgt_n++;
+		pgui->flags |= GUI_CARETBLINKING;
+		pgui->hwndCaret = (HWND)(ULONG_PTR)0x00010010;
+		base = 100 + (LONG)((mgt_n % 40) * 3);
+		pgui->rcCaret.left   = base;
+		pgui->rcCaret.top    = 200 + (LONG)(mgt_n % 25);
+		pgui->rcCaret.right  = base + 2;
+		pgui->rcCaret.bottom = 216 + (LONG)(mgt_n % 25);
+		ret = TRUE;
+	}
+
+	LOQ_bool("misc", "");
 	return ret;
 }
 
