@@ -2008,6 +2008,10 @@ HOOKDEF(BOOL, WINAPI, GetGUIThreadInfo,
 	_Inout_ PGUITHREADINFO pgui
 );
 
+HOOKDEF(SHORT, WINAPI, GetKeyState,
+	_In_ int nVirtKey
+);
+
 HOOKDEF(BOOL, WINAPI, GetComputerNameA,
 	_Out_	PCTSTR lpBuffer,
 	_Inout_  LPDWORD lpnSize

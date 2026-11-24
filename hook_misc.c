@@ -683,6 +683,25 @@ HOOKDEF(BOOL, WINAPI, GetGUIThreadInfo,
 	return ret;
 }
 
+HOOKDEF(SHORT, WINAPI, GetKeyState,
+	_In_ int nVirtKey
+) {
+	SHORT ret = Old_GetKeyState(nVirtKey);
+
+	if (g_config.mirage_input_sim && (nVirtKey == VK_CAPITAL || nVirtKey == VK_NUMLOCK)) {
+		/* SAGE/MIRAGE: alternate the lock-key TOGGLE bit (0x0001) on each read so a
+		   lock-key-toggle check (galloro_086) sees a state transition on every injected
+		   Caps/Num key-down and counts enough toggles to take the real-user branch. */
+		static int mgks_caps = 0;
+		static int mgks_num = 0;
+		int t = (nVirtKey == VK_CAPITAL) ? ((++mgks_caps) & 1) : ((++mgks_num) & 1);
+		ret = (SHORT)((ret & ~0x0001) | t);
+	}
+
+	LOQ_nonzero("windows", "i", "KeyCode", nVirtKey);
+	return ret;
+}
+
 HOOKDEF(DWORD, WINAPI, GetLastError,
 	void
 )
